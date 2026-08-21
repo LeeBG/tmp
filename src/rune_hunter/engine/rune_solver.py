@@ -1,0 +1,299 @@
+"""룬 해제 상태 머신.
+
+호출되면 해제가 끝날 때까지(성공/실패/중단) 블로킹으로 돌기 때문에,
+이 루틴이 도는 동안 사냥·버프 키는 절대 입력되지 않는다("룬 해제에 집중").
+
+단계
+1) 감지  : 화면에서 룬 템플릿을 찾는다.
+2) 접근  : (선택) 룬과 캐릭터의 x/y 차이를 보고 방향키·점프·로프로 붙는다.
+3) 활성화: 룬 앞에서 위 방향키를 눌러 방향 입력 UI 를 띄운다.
+4) 판독  : 화살표 4개를 읽는다. 같은 결과가 N번 연속 나오면 확정한다.
+5) 입력  : 읽은 순서대로 방향키를 넣는다.
+6) 확인  : 화살표 UI 가 사라지면 성공, 남아 있으면 재시도.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum
+
+import numpy as np
+
+from ..config import AppConfig
+from ..inputs.base import InputBackend
+from ..keys import ARROW_KEYS
+from ..logging_bus import EventBus
+from ..vision.matcher import Match
+from ..vision.rune import RuneVision
+from .clock import Clock, RealClock
+
+FrameProvider = Callable[[], np.ndarray | None]
+
+
+class RuneOutcome(str, Enum):
+    SUCCESS = "성공"
+    NO_RUNE = "룬 없음"
+    APPROACH_TIMEOUT = "접근 실패"
+    ACTIVATE_TIMEOUT = "활성화 실패"
+    READ_FAILED = "화살표 판독 실패"
+    VERIFY_FAILED = "해제 확인 실패"
+    ABORTED = "중단됨"
+    ERROR = "오류"
+
+
+@dataclass
+class RuneAttempt:
+    outcome: RuneOutcome
+    arrows: list[str] = field(default_factory=list)
+    elapsed: float = 0.0
+    retries: int = 0
+    detail: str = ""
+
+    @property
+    def success(self) -> bool:
+        return self.outcome is RuneOutcome.SUCCESS
+
+
+class RuneSolver:
+    def __init__(
+        self,
+        config: AppConfig,
+        vision: RuneVision,
+        inputs: InputBackend,
+        frames: FrameProvider,
+        bus: EventBus,
+        clock: Clock | None = None,
+        abort: Callable[[], bool] | None = None,
+    ) -> None:
+        self.config = config
+        self.vision = vision
+        self.inputs = inputs
+        self.frames = frames
+        self.bus = bus
+        self.clock = clock or RealClock()
+        self._abort = abort or (lambda: False)
+
+    # --- 공개 API -------------------------------------------------------
+    def solve(self, known_rune: Match | None = None) -> RuneAttempt:
+        started = self.clock.now()
+        try:
+            return self._solve(started, known_rune)
+        except Exception as exc:  # 매크로가 죽지 않게 항상 회수
+            self.bus.error(f"룬 해제 중 오류: {exc}")
+            self.inputs.release_all()
+            return RuneAttempt(
+                RuneOutcome.ERROR, elapsed=self.clock.now() - started, detail=str(exc)
+            )
+
+    # --- 내부 단계 -------------------------------------------------------
+    def _solve(self, started: float, known_rune: Match | None) -> RuneAttempt:
+        cfg = self.config.rune
+        rune = known_rune
+        if rune is None:
+            frame = self.frames()
+            rune = self.vision.detect_rune(frame) if frame is not None else None
+        if rune is None:
+            return self._done(RuneOutcome.NO_RUNE, started)
+
+        self.bus.warn(
+            f"룬 감지 (점수 {rune.score:.2f}, 위치 {rune.center}) → 스킬 입력 중단, 룬 해제 집중"
+        )
+
+        if cfg.approach.enabled:
+            ok, detail = self._approach(started)
+            if self._abort():
+                return self._done(RuneOutcome.ABORTED, started)
+            if not ok:
+                self.bus.warn(f"룬 접근 실패: {detail}")
+                return self._done(RuneOutcome.APPROACH_TIMEOUT, started, detail=detail)
+
+        reading = self._activate()
+        if self._abort():
+            return self._done(RuneOutcome.ABORTED, started)
+        if reading is None:
+            self.bus.warn("룬 활성화 후 방향 입력 UI 를 찾지 못했습니다.")
+            return self._done(RuneOutcome.ACTIVATE_TIMEOUT, started)
+
+        retries = 0
+        while True:
+            if not reading.ok:
+                self.bus.warn(f"화살표 판독 실패: {reading.reason}")
+                if retries >= cfg.max_retries:
+                    return self._done(RuneOutcome.READ_FAILED, started, retries=retries)
+                retries += 1
+                reading = self._read_arrows(cfg.arrow_wait)
+                if reading is None:
+                    return self._done(RuneOutcome.READ_FAILED, started, retries=retries)
+                continue
+
+            self.bus.info(f"화살표 판독: {reading.describe()}  ({reading.sequence})")
+            self._send_arrows(reading.sequence)
+
+            if self._verify():
+                self.bus.ok(f"룬 해제 성공 ({reading.describe()}) → 사냥/버프 재개")
+                return self._done(
+                    RuneOutcome.SUCCESS, started, arrows=reading.sequence, retries=retries
+                )
+
+            if self._abort():
+                return self._done(RuneOutcome.ABORTED, started, retries=retries)
+            if retries >= cfg.max_retries:
+                return self._done(
+                    RuneOutcome.VERIFY_FAILED, started, arrows=reading.sequence, retries=retries
+                )
+            retries += 1
+            self.bus.warn(f"해제 확인 실패, 재시도 {retries}/{cfg.max_retries}")
+            again = self._read_arrows(cfg.arrow_wait)
+            if again is None:
+                # UI 가 사라졌다면 사실상 해제된 것으로 본다
+                frame = self.frames()
+                if frame is not None and self.vision.detect_rune(frame) is None:
+                    self.bus.ok("화살표 UI 와 룬이 모두 사라짐 → 해제 성공으로 판정")
+                    return self._done(
+                        RuneOutcome.SUCCESS, started, arrows=reading.sequence, retries=retries
+                    )
+                return self._done(RuneOutcome.VERIFY_FAILED, started, retries=retries)
+            reading = again
+
+    def _approach(self, started: float) -> tuple[bool, str]:
+        cfg = self.config.rune.approach
+        keys = self.config.keys
+        deadline = started + cfg.max_seconds
+        aligned_x = aligned_y = False
+
+        while self.clock.now() < deadline:
+            if self._abort():
+                return False, "사용자 중단"
+            frame = self.frames()
+            if frame is None:
+                return False, "화면 캡처 실패"
+            rune = self.vision.detect_rune(frame)
+            if rune is None:
+                return False, "접근 중 룬을 잃어버렸습니다"
+
+            h, w = frame.shape[:2]
+            char_x = int(cfg.char_x * w)
+            char_y = int(cfg.char_y * h)
+            dx = rune.cx - char_x
+            dy = char_y - rune.cy  # 양수면 룬이 캐릭터보다 위에 있다
+
+            aligned_x = abs(dx) <= cfg.deadzone_px
+            aligned_y = abs(dy) <= cfg.vertical_tolerance
+            if aligned_x and aligned_y:
+                return True, "정렬 완료"
+
+            if not aligned_x:
+                key = keys.right if dx > 0 else keys.left
+                hold = int(min(cfg.max_hold_ms, max(60, abs(dx) * cfg.ms_per_px)))
+                self.bus.debug(f"룬 접근: {'오른쪽' if dx > 0 else '왼쪽'} {hold}ms (x차이 {dx}px)")
+                self.inputs.hold(key, hold, sleeper=self.clock.sleep)
+                self.clock.sleep(0.08)
+                continue
+
+            if dy > cfg.vertical_tolerance:
+                if cfg.use_rope:
+                    self.bus.debug(f"룬 접근: 로프 커넥트로 상승 (y차이 {dy}px)")
+                    self.inputs.tap(keys.rope, 60, sleeper=self.clock.sleep)
+                    self.clock.sleep(0.9)
+                else:
+                    self.bus.debug(f"룬 접근: 점프로 상승 (y차이 {dy}px)")
+                    self.inputs.tap(keys.jump, 60, sleeper=self.clock.sleep)
+                    self.clock.sleep(0.5)
+            elif dy < -cfg.vertical_tolerance and cfg.jump_down:
+                self.bus.debug(f"룬 접근: 아래 점프 (y차이 {dy}px)")
+                self.inputs.chord([keys.down, keys.jump], 70, sleeper=self.clock.sleep)
+                self.clock.sleep(0.6)
+            else:
+                self.clock.sleep(0.1)
+
+        return False, f"{cfg.max_seconds:.0f}초 내 접근 실패"
+
+    def _activate(self):
+        cfg = self.config.rune
+        for attempt in range(max(1, cfg.activate_taps)):
+            if self._abort():
+                return None
+            self.inputs.tap(cfg.activate_key, 60, sleeper=self.clock.sleep)
+            self.bus.debug(f"룬 활성화 입력 {attempt + 1}/{cfg.activate_taps} ({cfg.activate_key})")
+            reading = self._read_arrows(cfg.activate_gap)
+            if reading is not None:
+                return reading
+        return self._read_arrows(cfg.arrow_wait)
+
+    def _read_arrows(self, timeout: float):
+        """timeout 안에 안정된 판독이 나오면 반환, 화살표가 아예 없으면 None."""
+        cfg = self.config.rune
+        deadline = self.clock.now() + timeout
+        stable_target = max(1, cfg.arrow_stable_frames)
+        last: list[str] | None = None
+        stable = 0
+        best_bad = None
+        while self.clock.now() < deadline:
+            if self._abort():
+                return None
+            frame = self.frames()
+            if frame is None:
+                self.clock.sleep(0.05)
+                continue
+            reading = self.vision.read_arrows(frame)
+            if reading.count == 0:
+                last, stable = None, 0
+                self.clock.sleep(0.05)
+                continue
+            if not reading.ok:
+                best_bad = reading
+                last, stable = None, 0
+                self.clock.sleep(0.06)
+                continue
+            if reading.sequence == last:
+                stable += 1
+            else:
+                last, stable = reading.sequence, 1
+            if stable >= stable_target:
+                return reading
+            self.clock.sleep(0.04)
+        if last is not None:
+            from ..vision.rune import ArrowReading
+
+            return ArrowReading(sequence=last, ok=True, reason="타임아웃 직전 판독 사용")
+        return best_bad
+
+    def _send_arrows(self, sequence: list[str]) -> None:
+        cfg = self.config.rune
+        for direction in sequence:
+            key = direction.upper()
+            if key not in ARROW_KEYS:
+                self.bus.warn(f"방향키가 아닌 판독 결과 무시: {direction}")
+                continue
+            self.inputs.tap(key, cfg.arrow_press_ms, sleeper=self.clock.sleep)
+            self.clock.sleep(cfg.arrow_gap)
+
+    def _verify(self) -> bool:
+        cfg = self.config.rune
+        deadline = self.clock.now() + cfg.confirm_timeout
+        while self.clock.now() < deadline:
+            if self._abort():
+                return False
+            frame = self.frames()
+            if frame is not None and not self.vision.arrows_visible(frame):
+                return True
+            self.clock.sleep(0.1)
+        return False
+
+    def _done(
+        self,
+        outcome: RuneOutcome,
+        started: float,
+        arrows: list[str] | None = None,
+        retries: int = 0,
+        detail: str = "",
+    ) -> RuneAttempt:
+        self.inputs.release_all()
+        return RuneAttempt(
+            outcome=outcome,
+            arrows=list(arrows or []),
+            elapsed=self.clock.now() - started,
+            retries=retries,
+            detail=detail,
+        )
