@@ -256,7 +256,10 @@ run.bat
 | 룬 위로 못 올라감 | 로프 커넥트 키가 게임 설정과 같은지 확인, 높이 차 허용 조정 |
 | 사냥 주기가 설정보다 느림 | 통계의 루프 지연 확인. 룬 해제 시간은 사냥 시간에서 빠지므로 어느 정도 차이는 정상 |
 | CPU 사용률이 높음 | 탐색 영역 좁히기 → 감지 축소 배율 0.5 → 룬 탐색 주기 1.0초 |
-| GUI 가 안 뜸 / 모듈 오류 | `.venv` 폴더 삭제 후 `run.bat` 재실행 |
+| **창이 뜨자마자 바로 닫힘** | `run.bat` 은 이제 콘솔을 닫지 않고 오류를 보여주고 멈춥니다. 그 메시지를 확인하고, 아래 점검 명령을 실행하세요. 파이썬 예외는 `logs\crash.log` 에도 남습니다 |
+| GUI 가 안 뜸 / 모듈 오류 | `.venv\Scripts\python -m rune_hunter --diagnose` 로 점검 → 모듈이 빠졌으면 `run.bat` 재실행(자동 재설치). 그래도 안 되면 `.venv` 폴더 삭제 후 `run.bat` |
+| `Qt platform plugin could be initialized` | Microsoft Visual C++ 재배포 패키지(x64) 설치 후 재실행 |
+| UAC 창이 안 뜸 | `run.bat` 을 우클릭 → `관리자 권한으로 실행` |
 
 ---
 
@@ -264,6 +267,7 @@ run.bat
 
 ```bat
 .venv\Scripts\python -m rune_hunter                    :: 일반 실행
+.venv\Scripts\python -m rune_hunter --diagnose         :: 실행 환경 점검 (안 켜질 때 제일 먼저)
 .venv\Scripts\python -m rune_hunter --demo             :: 데모 모드로 시작
 .venv\Scripts\python -m rune_hunter --no-admin         :: 관리자 승격 없이 실행
 .venv\Scripts\python -m rune_hunter --profile my.json  :: 다른 프로필로 실행
