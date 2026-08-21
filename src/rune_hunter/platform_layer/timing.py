@@ -13,8 +13,13 @@ from contextlib import contextmanager
 
 from . import IS_WINDOWS
 
-#: 남은 시간이 이 값보다 작으면 sleep 대신 스핀(바쁜 대기)으로 기다린다.
-SPIN_THRESHOLD = 0.0015
+#: 이 시간 이상 기다릴 때는 스핀 없이 그냥 sleep 한다.
+#: 타이머 해상도가 1ms 면 오차가 1ms 내외라 사냥 주기(수십~수백 ms)에 영향이 없다.
+LONG_WAIT = 0.004
+
+#: 아주 짧은 대기에서만 마지막 이만큼을 스핀으로 채운다.
+#: (스핀은 정확하지만 CPU 를 100% 쓰기 때문에 최소로만 사용한다)
+SPIN_THRESHOLD = 0.0003
 
 now = time.perf_counter
 
@@ -40,8 +45,16 @@ def high_resolution_timer():
 
 
 def precise_sleep(duration: float) -> None:
-    """duration 초 동안 대기한다 (짧은 구간은 스핀으로 오차 최소화)."""
+    """duration 초 동안 대기한다.
+
+    긴 대기는 그냥 sleep 하고(CPU 0%), 1ms 미만의 짧은 대기만 스핀으로 채운다.
+    예전에는 모든 대기의 마지막 1.5ms 를 스핀으로 채웠는데, 4ms 주기 루프에서
+    CPU 를 35% 나 먹었다.
+    """
     if duration <= 0:
+        return
+    if duration >= LONG_WAIT:
+        time.sleep(duration)
         return
     deadline = now() + duration
     coarse = duration - SPIN_THRESHOLD

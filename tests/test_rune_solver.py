@@ -136,6 +136,85 @@ def test_verify_failure_gives_up_after_retries(config, vision, bus):
     assert clock.now() < 1000 + 60, "실패 처리에 1분 이상 쓰면 안 된다"
 
 
+class FlakyWorld(DemoWorld):
+    """첫 입력은 무조건 실패 처리한다 (게임이 UI 만 닫고 룬을 남기는 상황)."""
+
+    def _arrow_input(self, key: str) -> None:
+        if getattr(self, "sabotaged", False):
+            super()._arrow_input(key)
+            return
+        self.buffer.append(key)
+        if len(self.buffer) < len(self.expected):
+            return
+        self.sabotaged = True
+        self.wrong_inputs += 1
+        self.arrows = None
+        self.buffer.clear()
+        self._log("입력 실패 처리 (UI 닫힘, 룬 유지)", "error")
+
+
+def test_retries_when_rune_remains_after_wrong_input(config, vision, bus):
+    """순서를 틀려 룬이 남으면 다시 활성화해서 재시도해야 한다."""
+    clock = ManualClock()
+    world = FlakyWorld(
+        settings=DemoSettings(first_rune_after=0.0), bus=bus, time_fn=clock.now
+    )
+    world.rune_present = True
+    world.next_spawn = float("inf")
+    world.sabotaged = False
+    backend = RecordingBackend(sink=world.on_key)
+    config.rune.approach.enabled = False
+    config.rune.max_retries = 2
+    solver = RuneSolver(
+        config=config,
+        vision=vision,
+        inputs=backend,
+        frames=lambda: world.render(),
+        bus=bus,
+        clock=clock,
+    )
+    attempt = solver.solve()
+
+    assert attempt.outcome is RuneOutcome.SUCCESS
+    assert attempt.retries >= 1
+    assert world.wrong_inputs == 1
+    assert world.solved == 1
+
+
+def test_gives_up_when_rune_never_disappears(config, vision, bus):
+    """룬이 계속 남아 있으면 재시도 후 실패로 끝나고 무한 루프에 빠지지 않는다."""
+    clock = ManualClock()
+    frame_state = {"arrows": ["UP", "UP", "UP", "UP"]}
+
+    def frames():
+        return render_screen(rune_pos=(512, 422), arrows=frame_state["arrows"])
+
+    backend = RecordingBackend()
+
+    def sink(event):
+        # 화살표 입력이 끝나면 UI 만 닫히고 룬은 그대로 남는 상황을 흉내낸다
+        if event.action == "down" and event.key in ("UP", "DOWN", "LEFT", "RIGHT"):
+            if len([e for e in backend.events if e.action == "down"]) > 4:
+                frame_state["arrows"] = None
+
+    backend.set_sink(sink)
+    config.rune.approach.enabled = False
+    config.rune.max_retries = 1
+    solver = RuneSolver(
+        config=config,
+        vision=vision,
+        inputs=backend,
+        frames=frames,
+        bus=bus,
+        clock=clock,
+    )
+    attempt = solver.solve()
+
+    assert not attempt.success
+    assert attempt.outcome in (RuneOutcome.VERIFY_FAILED, RuneOutcome.ACTIVATE_TIMEOUT)
+    assert clock.now() < 1000 + 90, "실패 처리에 90초 이상 쓰면 안 된다"
+
+
 def test_all_keys_released_after_solve(config, vision, bus):
     solver, world, backend, _ = build(config, vision, bus, offset=(200, 150))
     solver.solve()

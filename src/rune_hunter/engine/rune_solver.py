@@ -108,53 +108,47 @@ class RuneSolver:
                 self.bus.warn(f"룬 접근 실패: {detail}")
                 return self._done(RuneOutcome.APPROACH_TIMEOUT, started, detail=detail)
 
-        reading = self._activate()
-        if self._abort():
-            return self._done(RuneOutcome.ABORTED, started)
-        if reading is None:
-            self.bus.warn("룬 활성화 후 방향 입력 UI 를 찾지 못했습니다.")
-            return self._done(RuneOutcome.ACTIVATE_TIMEOUT, started)
+        last_outcome = RuneOutcome.ACTIVATE_TIMEOUT
+        last_arrows: list[str] = []
+        for retries in range(max(0, cfg.max_retries) + 1):
+            if retries:
+                self.bus.warn(f"룬 해제 재시도 {retries}/{cfg.max_retries}")
+            if self._abort():
+                return self._done(RuneOutcome.ABORTED, started, retries=retries)
 
-        retries = 0
-        while True:
+            reading = self._activate()
+            if reading is None:
+                self.bus.warn("룬 활성화 후 방향 입력 UI 를 찾지 못했습니다.")
+                last_outcome = RuneOutcome.ACTIVATE_TIMEOUT
+                continue
             if not reading.ok:
                 self.bus.warn(f"화살표 판독 실패: {reading.reason}")
-                if retries >= cfg.max_retries:
-                    return self._done(RuneOutcome.READ_FAILED, started, retries=retries)
-                retries += 1
-                reading = self._read_arrows(cfg.arrow_wait)
-                if reading is None:
-                    return self._done(RuneOutcome.READ_FAILED, started, retries=retries)
-                continue
+                retry_reading = self._read_arrows(cfg.arrow_wait)
+                if retry_reading is None or not retry_reading.ok:
+                    last_outcome = RuneOutcome.READ_FAILED
+                    continue
+                reading = retry_reading
 
             self.bus.info(f"화살표 판독: {reading.describe()}  ({reading.sequence})")
+            last_arrows = list(reading.sequence)
             self._send_arrows(reading.sequence)
 
-            if self._verify():
+            verdict = self._verify()
+            if verdict == "success":
                 self.bus.ok(f"룬 해제 성공 ({reading.describe()}) → 사냥/버프 재개")
                 return self._done(
                     RuneOutcome.SUCCESS, started, arrows=reading.sequence, retries=retries
                 )
+            if verdict == "arrows_remain":
+                self.bus.warn("화살표 UI 가 그대로 남아 있습니다 (입력이 전달되지 않았을 수 있음)")
+                last_outcome = RuneOutcome.VERIFY_FAILED
+            else:  # rune_remains — 입력 순서가 틀렸을 때 게임이 이렇게 반응한다
+                self.bus.warn("화살표는 사라졌지만 룬이 남아 있습니다 — 입력 순서 실패로 판단")
+                last_outcome = RuneOutcome.VERIFY_FAILED
 
-            if self._abort():
-                return self._done(RuneOutcome.ABORTED, started, retries=retries)
-            if retries >= cfg.max_retries:
-                return self._done(
-                    RuneOutcome.VERIFY_FAILED, started, arrows=reading.sequence, retries=retries
-                )
-            retries += 1
-            self.bus.warn(f"해제 확인 실패, 재시도 {retries}/{cfg.max_retries}")
-            again = self._read_arrows(cfg.arrow_wait)
-            if again is None:
-                # UI 가 사라졌다면 사실상 해제된 것으로 본다
-                frame = self.frames()
-                if frame is not None and self.vision.detect_rune(frame) is None:
-                    self.bus.ok("화살표 UI 와 룬이 모두 사라짐 → 해제 성공으로 판정")
-                    return self._done(
-                        RuneOutcome.SUCCESS, started, arrows=reading.sequence, retries=retries
-                    )
-                return self._done(RuneOutcome.VERIFY_FAILED, started, retries=retries)
-            reading = again
+        return self._done(
+            last_outcome, started, arrows=last_arrows, retries=max(0, cfg.max_retries)
+        )
 
     def _approach(self, started: float) -> tuple[bool, str]:
         cfg = self.config.rune.approach
@@ -214,6 +208,13 @@ class RuneSolver:
         for attempt in range(max(1, cfg.activate_taps)):
             if self._abort():
                 return None
+            # 화살표 UI 가 이미 떠 있는데 활성화 키를 또 누르면 그 입력이 방향 입력으로
+            # 들어가 순서가 어긋난다. 그래서 매 시도 전에 UI 상태를 먼저 확인한다.
+            frame = self.frames()
+            if frame is not None and self.vision.arrows_visible(frame):
+                self.bus.debug("방향 입력 UI 가 이미 떠 있음 — 활성화 입력 생략")
+                return self._read_arrows(cfg.arrow_wait)
+
             self.inputs.tap(cfg.activate_key, 60, sleeper=self.clock.sleep)
             self.bus.debug(f"룬 활성화 입력 {attempt + 1}/{cfg.activate_taps} ({cfg.activate_key})")
             reading = self._read_arrows(cfg.activate_gap)
@@ -269,17 +270,33 @@ class RuneSolver:
             self.inputs.tap(key, cfg.arrow_press_ms, sleeper=self.clock.sleep)
             self.clock.sleep(cfg.arrow_gap)
 
-    def _verify(self) -> bool:
+    def _verify(self) -> str:
+        """'success' | 'arrows_remain' | 'rune_remains'.
+
+        화살표 UI 가 사라지는 것만으로는 성공을 확신할 수 없다. 순서를 틀리면
+        게임도 UI 를 닫지만 룬은 그대로 남기 때문에, 룬이 사라졌는지까지 확인한다.
+        """
         cfg = self.config.rune
         deadline = self.clock.now() + cfg.confirm_timeout
+        arrows_gone = False
         while self.clock.now() < deadline:
             if self._abort():
-                return False
+                return "arrows_remain"
             frame = self.frames()
             if frame is not None and not self.vision.arrows_visible(frame):
-                return True
+                arrows_gone = True
+                break
             self.clock.sleep(0.1)
-        return False
+        if not arrows_gone:
+            return "arrows_remain"
+
+        rune_deadline = self.clock.now() + max(1.0, cfg.confirm_timeout / 2)
+        while self.clock.now() < rune_deadline:
+            frame = self.frames()
+            if frame is not None and self.vision.detect_rune(frame) is None:
+                return "success"
+            self.clock.sleep(0.15)
+        return "rune_remains"
 
     def _done(
         self,

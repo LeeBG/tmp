@@ -34,7 +34,7 @@ from .scheduler import SkillScheduler
 
 #: 제어 루프가 아무 할 일이 없을 때의 최소 대기 시간(초).
 #: 0 으로 두면 루프가 CPU 한 코어를 그대로 태운다.
-MIN_SLEEP = 0.0008
+MIN_SLEEP = 0.004
 
 
 class EngineState(str, Enum):
@@ -353,8 +353,11 @@ class MacroEngine:
         if self.config.attack.movement.enabled:
             deadlines.append(self._next_move_at)
         deadline = min(deadlines)
-        # 최소 대기를 두어 할 일이 없을 때 CPU 를 태우지 않게 한다.
-        wait = min(max(deadline - now, MIN_SLEEP), tick)
+        wait = deadline - now
+        if wait <= 0:
+            # 예정된 일이 없으면 최소 대기를 준다 (0 으로 두면 CPU 한 코어를 태운다)
+            wait = MIN_SLEEP
+        wait = min(wait, tick)
         target = now + wait
         if wait > 0:
             self.clock.sleep(wait)
