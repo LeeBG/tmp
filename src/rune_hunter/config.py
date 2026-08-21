@@ -13,7 +13,20 @@ from typing import Any, get_args, get_origin
 
 CONFIG_VERSION = 1
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def _project_root() -> Path:
+    """설정·템플릿·로그를 둘 폴더.
+
+    소스 체크아웃(또는 editable 설치)이면 저장소 루트를 쓰고, 그 외에는
+    site-packages 안에 파일을 쓰지 않도록 현재 작업 폴더를 쓴다.
+    """
+    candidate = Path(__file__).resolve().parents[2]
+    if (candidate / "pyproject.toml").exists():
+        return candidate
+    return Path.cwd()
+
+
+PROJECT_ROOT = _project_root()
 DEFAULT_PROFILE_DIR = PROJECT_ROOT / "profiles"
 DEFAULT_PROFILE_PATH = DEFAULT_PROFILE_DIR / "default.json"
 DEFAULT_TEMPLATE_DIR = PROJECT_ROOT / "templates"
