@@ -152,6 +152,43 @@ def test_pending_buff_is_used_after_rune(config, vision, bus):
     assert backend.count("Q") >= 2
 
 
+def test_minimap_mode_solves_rune_that_is_off_screen(config, vision, bus):
+    """미니맵 모드: 룬이 화면에 안 보여도 미니맵으로 찾아 이동 후 해제한다."""
+    from rune_hunter.config import Roi
+    from rune_hunter.vision import synth
+
+    mm_x, mm_y, mm_w, mm_h = synth.MINIMAP_RECT
+    config.rune.source = "minimap"
+    config.rune.minimap.enabled = True
+    config.rune.minimap.roi = Roi(mm_x / 1024, mm_y / 768, mm_w / 1024, mm_h / 768)
+    config.rune.activate_key = "SPACE"
+    config.rune.check_interval = 0.25
+    config.rune.cooldown_success = 10.0
+    config.attack.hunt.key = "U"
+    config.attack.hunt.interval = 0.05
+
+    world = DemoWorld(
+        settings=DemoSettings(
+            first_rune_after=0.3,
+            respawn_after=99,
+            activate_key="SPACE",
+            max_offset_x=430,
+        ),
+        bus=bus,
+    )
+    engine, _, backend = build_engine(config, vision, bus, world=world)
+
+    engine.start()
+    time.sleep(12.0)
+    engine.stop()
+
+    assert world.spawned >= 1
+    assert world.solved >= 1, "미니맵 정렬 후 해제가 완료되지 않았다"
+    assert engine.status().stats.rune_success >= 1
+    assert "SPACE" in backend.taps()
+    assert backend.count("U") > 10, "해제 후 사냥이 재개되어야 한다"
+
+
 def test_no_input_when_window_missing(config, vision, bus):
     class Missing:
         def find(self, titles):

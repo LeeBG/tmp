@@ -26,6 +26,7 @@ from ..inputs.base import InputBackend
 from ..logging_bus import EventBus
 from ..platform_layer.timing import high_resolution_timer
 from ..platform_layer.windows import WindowInfo, WindowLocator
+from ..vision.minimap import MinimapVision
 from ..vision.rune import RuneVision
 from .clock import Clock, RealClock
 from .rune_solver import RuneAttempt, RuneOutcome, RuneSolver
@@ -106,6 +107,7 @@ class MacroEngine:
         self.bus = bus
         self.clock = clock or RealClock()
         self.on_state = on_state
+        self.minimap = MinimapVision(config)
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -267,12 +269,18 @@ class MacroEngine:
         if frame is None:
             return False
         t0 = self.clock.now()
-        match = self.vision.detect_rune(frame)
+        if cfg.use_minimap:
+            reading = self.minimap.read(frame)
+            match = None
+            found = reading.rune is not None
+        else:
+            match = self.vision.detect_rune(frame)
+            found = match is not None
         elapsed_ms = (self.clock.now() - t0) * 1000.0
         self._stats.detections += 1
         self._stats.detect_ms_total += elapsed_ms
         self._stats.detect_ms_max = max(self._stats.detect_ms_max, elapsed_ms)
-        if match is None:
+        if not found:
             return False
 
         self._set_state(EngineState.RUNE)
@@ -288,6 +296,7 @@ class MacroEngine:
             bus=self.bus,
             clock=self.clock,
             abort=self._stop.is_set,
+            minimap=self.minimap,
         )
         attempt = solver.solve(match)
         self.last_attempt = attempt

@@ -213,6 +213,78 @@ class MainWindow(QMainWindow):
         self.rune_enabled.setChecked(rune.enabled)
         layout.addWidget(self.rune_enabled)
 
+        source_box = QGroupBox("룬 찾는 방식")
+        source_layout = QVBoxLayout(source_box)
+        self.source_minimap = QCheckBox("미니맵 색상으로 찾기 (룬이 화면 밖에 있어도 감지 — 권장)")
+        self.source_minimap.setChecked(rune.source == "minimap")
+        source_note = QLabel(
+            "미니맵의 <b>보라색 룬 표식</b>과 <b>노란색 캐릭터 표식</b>이 겹치도록 이동한 뒤 활성화 키를 누릅니다.<br>"
+            "끄면 화면에 보이는 룬 이미지(템플릿)로 찾습니다."
+        )
+        source_note.setObjectName("subtitle")
+        source_note.setWordWrap(True)
+        source_layout.addWidget(self.source_minimap)
+        source_layout.addWidget(source_note)
+        layout.addWidget(source_box)
+
+        mm = rune.minimap
+        mm_box = QGroupBox("미니맵 설정")
+        mm_layout = QVBoxLayout(mm_box)
+
+        roi_row = QHBoxLayout()
+        roi_row.addWidget(QLabel("미니맵 영역"))
+        self.mm_roi_label = QLabel(mm.roi.describe())
+        self.mm_roi_label.setObjectName("subtitle")
+        roi_row.addWidget(self.mm_roi_label, 1)
+        mm_roi_button = QPushButton("영역 지정")
+        mm_roi_button.clicked.connect(self._pick_minimap_roi)
+        roi_row.addWidget(mm_roi_button)
+        mm_layout.addLayout(roi_row)
+
+        color_row = QHBoxLayout()
+        self.mm_rune_color_label = QLabel(mm.rune_color.describe())
+        self.mm_rune_color_label.setObjectName("subtitle")
+        self.mm_char_color_label = QLabel(mm.char_color.describe())
+        self.mm_char_color_label.setObjectName("subtitle")
+        rune_color_btn = QPushButton("룬 색 추출")
+        rune_color_btn.clicked.connect(lambda: self._sample_minimap_color("rune"))
+        char_color_btn = QPushButton("캐릭터 색 추출")
+        char_color_btn.clicked.connect(lambda: self._sample_minimap_color("char"))
+        color_grid = QGridLayout()
+        color_grid.addWidget(QLabel("룬 표식 색"), 0, 0)
+        color_grid.addWidget(self.mm_rune_color_label, 0, 1)
+        color_grid.addWidget(rune_color_btn, 0, 2)
+        color_grid.addWidget(QLabel("캐릭터 표식 색"), 1, 0)
+        color_grid.addWidget(self.mm_char_color_label, 1, 1)
+        color_grid.addWidget(char_color_btn, 1, 2)
+        color_grid.setColumnStretch(1, 1)
+        mm_layout.addLayout(color_grid)
+        color_row.addStretch(1)
+
+        mm_form = QFormLayout()
+        self.mm_tolerance = self._spin(mm.align_tolerance, 0, 20, 1, " px")
+        self.mm_vtolerance = self._spin(mm.vertical_tolerance, 0, 20, 1, " px")
+        self.mm_ms_per_px = self._dspin(mm.ms_per_px, 5.0, 400.0, 5.0, " ms/px", 1)
+        self.mm_max_hold = self._spin(mm.max_hold_ms, 100, 3000, 50, " ms")
+        self.mm_max_seconds = self._dspin(mm.max_seconds, 3.0, 120.0, 1.0, " 초")
+        self.mm_auto = QCheckBox("이동 계수 자동 보정 (맵마다 다른 미니맵 배율에 맞춤)")
+        self.mm_auto.setChecked(mm.auto_calibrate)
+        self.mm_rope = QCheckBox("위로 올라갈 때 로프 커넥트 사용")
+        self.mm_rope.setChecked(mm.use_rope)
+        mm_form.addRow("좌우 정렬 허용 오차", self.mm_tolerance)
+        mm_form.addRow("높이 허용 오차", self.mm_vtolerance)
+        mm_form.addRow("이동 환산 계수", self.mm_ms_per_px)
+        mm_form.addRow("1회 최대 이동", self.mm_max_hold)
+        mm_form.addRow("정렬 제한 시간", self.mm_max_seconds)
+        mm_form.addRow(self.mm_auto)
+        mm_form.addRow(self.mm_rope)
+        mm_layout.addLayout(mm_form)
+
+        mm_test = QPushButton("미니맵 인식 테스트 (룬·캐릭터 좌표 확인)")
+        mm_test.clicked.connect(self._test_minimap)
+        mm_layout.addWidget(mm_test)
+        layout.addWidget(mm_box)
+
         tpl_box = QGroupBox("템플릿 이미지")
         tpl_layout = QGridLayout(tpl_box)
         tpl_layout.setColumnStretch(1, 1)
@@ -504,6 +576,15 @@ class MainWindow(QMainWindow):
         rune.approach.vertical_tolerance = self.vertical_tol.value()
         rune.approach.max_seconds = self.approach_seconds.value()
         rune.approach.use_rope = self.use_rope.isChecked()
+        rune.source = "minimap" if self.source_minimap.isChecked() else "template"
+        rune.minimap.enabled = self.source_minimap.isChecked()
+        rune.minimap.align_tolerance = self.mm_tolerance.value()
+        rune.minimap.vertical_tolerance = self.mm_vtolerance.value()
+        rune.minimap.ms_per_px = self.mm_ms_per_px.value()
+        rune.minimap.max_hold_ms = self.mm_max_hold.value()
+        rune.minimap.max_seconds = self.mm_max_seconds.value()
+        rune.minimap.auto_calibrate = self.mm_auto.isChecked()
+        rune.minimap.use_rope = self.mm_rope.isChecked()
 
         general = cfg.general
         titles = [t.strip() for t in self.window_titles.text().split(",") if t.strip()]
@@ -532,6 +613,12 @@ class MainWindow(QMainWindow):
         self.arrow_count.setValue(cfg.rune.arrow_count)
         self.stable_frames.setValue(cfg.rune.arrow_stable_frames)
         self.activate_key.select(cfg.rune.activate_key)
+        self.source_minimap.setChecked(cfg.rune.source == "minimap")
+        self.mm_roi_label.setText(cfg.rune.minimap.roi.describe())
+        self.mm_rune_color_label.setText(cfg.rune.minimap.rune_color.describe())
+        self.mm_char_color_label.setText(cfg.rune.minimap.char_color.describe())
+        self.mm_tolerance.setValue(cfg.rune.minimap.align_tolerance)
+        self.mm_ms_per_px.setValue(cfg.rune.minimap.ms_per_px)
         self.rune_roi_label.setText(cfg.rune.rune_roi.describe())
         self.arrow_roi_label.setText(cfg.rune.arrow_roi.describe())
         self.window_titles.setText(", ".join(cfg.general.window_titles))
@@ -540,6 +627,21 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 엔진 제어
     # ------------------------------------------------------------------
+    def _demo_settings(self):
+        """데모 화면을 현재 설정(미니맵 영역·색·활성화 키)에 맞춰 만든다."""
+        from ..demo import DemoSettings
+        from ..vision.synth import color_from_spec
+
+        mm = self.config.rune.minimap
+        settings = DemoSettings(activate_key=self.config.rune.activate_key)
+        if self.config.rune.use_minimap:
+            width, height = settings.width, settings.height
+            settings.minimap_rect = mm.roi.to_pixels(width, height)
+            settings.minimap_rune_bgr = color_from_spec(mm.rune_color)
+            settings.minimap_char_bgr = color_from_spec(mm.char_color)
+            settings.max_offset_x = 420
+        return settings
+
     def _make_engine(self) -> MacroEngine:
         demo = self.demo_check.isChecked()
         vision = RuneVision(self.config)
@@ -554,7 +656,7 @@ class MainWindow(QMainWindow):
                 for name, image in demo_templates().items():
                     vision.register_template(name, template_from_array(image, name))
                 self.bus.info("데모 모드: 합성 템플릿을 사용합니다 (실제 이미지가 없어도 동작).")
-            world = DemoWorld(bus=self.bus)
+            world = DemoWorld(bus=self.bus, settings=self._demo_settings())
             backend = RecordingBackend(sink=world.on_key)
             self._demo_world = world
             from ..platform_layer.windows import VirtualWindowLocator
@@ -606,7 +708,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _current_frame(self) -> np.ndarray | None:
         if self.demo_check.isChecked():
-            world = self._demo_world or DemoWorld(bus=self.bus)
+            world = self._demo_world or DemoWorld(bus=self.bus, settings=self._demo_settings())
             self._demo_world = world
             return world.render()
         locator = create_locator()
@@ -725,6 +827,65 @@ class MainWindow(QMainWindow):
             self.bus.warn(f"룬을 찾지 못했습니다 (임계값 {self.config.rune.rune_threshold:.2f}, {ms:.1f}ms)")
         else:
             self.bus.ok(f"룬 감지 성공 — 점수 {match.score:.3f}, 위치 {match.center}, {ms:.1f}ms")
+
+    def _pick_minimap_roi(self) -> None:
+        roi = self._pick_roi(
+            "미니맵 영역",
+            "미니맵 전체를 드래그해서 선택하세요. 표식(보라·노랑)이 모두 들어가야 합니다.",
+        )
+        if roi is None:
+            return
+        self.config.rune.minimap.roi = roi
+        self.mm_roi_label.setText(roi.describe())
+        self.bus.info(f"미니맵 영역 설정: {roi.describe()}")
+
+    def _sample_minimap_color(self, target: str) -> None:
+        from ..vision.minimap import MinimapVision
+
+        frame = self._current_frame()
+        if frame is None:
+            return
+        label = "룬(보라색)" if target == "rune" else "캐릭터(노란색)"
+        dialog = RegionSelectDialog(
+            frame,
+            f"{label} 표식 색 추출",
+            f"미니맵에서 {label} 표식 부분만 작게 드래그하세요. 표식 색만 최대한 담기게 잡으면 정확합니다.",
+            self,
+        )
+        if not dialog.exec():
+            return
+        crop = dialog.cropped()
+        if crop is None or crop.size == 0:
+            QMessageBox.information(self, "영역 없음", "선택된 영역이 없습니다.")
+            return
+        spec = MinimapVision.sample_color(crop)
+        if target == "rune":
+            self.config.rune.minimap.rune_color = spec
+            self.mm_rune_color_label.setText(spec.describe())
+        else:
+            self.config.rune.minimap.char_color = spec
+            self.mm_char_color_label.setText(spec.describe())
+        self.bus.ok(f"{label} 색 범위 설정: {spec.describe()}")
+
+    def _test_minimap(self) -> None:
+        from ..vision.minimap import MinimapVision
+
+        self.collect()
+        frame = self._current_frame()
+        if frame is None:
+            return
+        import time
+
+        t0 = time.perf_counter()
+        reading = MinimapVision(self.config).read(frame)
+        ms = (time.perf_counter() - t0) * 1000
+        if reading.found:
+            self.bus.ok(f"미니맵 인식 성공 — {reading.describe()} ({ms:.1f}ms)")
+            tol = self.config.rune.minimap.align_tolerance
+            if abs(reading.dx or 0) <= tol:
+                self.bus.info("현재 캐릭터가 룬과 좌우로 정렬된 상태입니다.")
+        else:
+            self.bus.warn(f"{reading.describe()} ({ms:.1f}ms) — 미니맵 영역과 색 설정을 확인하세요.")
 
     def _test_arrows(self) -> None:
         self.collect()

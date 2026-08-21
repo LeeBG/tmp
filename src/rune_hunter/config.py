@@ -106,8 +106,59 @@ class ApproachConfig:
 
 
 @dataclass
+class ColorSpec:
+    """HSV 색 범위 (OpenCV 기준: H 0~179, S/V 0~255)."""
+
+    lower: list[int] = field(default_factory=lambda: [0, 0, 0])
+    upper: list[int] = field(default_factory=lambda: [179, 255, 255])
+    min_area: int = 2                      # 이보다 작은 덩어리는 무시(노이즈)
+
+    def describe(self) -> str:
+        return f"H {self.lower[0]}~{self.upper[0]}, S {self.lower[1]}~{self.upper[1]}, V {self.lower[2]}~{self.upper[2]}"
+
+
+def _purple() -> ColorSpec:
+    """미니맵의 룬 표식(보라/자주).
+
+    상한을 158 로 둔 이유: 배경 그라디언트에 노이즈가 끼면 H 160~175 대의
+    자주빛 픽셀이 몇 개씩 생겨 오탐이 난다. 채도/명도 하한도 함께 올려 걸러낸다.
+    """
+    return ColorSpec(lower=[125, 90, 80], upper=[158, 255, 255], min_area=3)
+
+
+def _yellow() -> ColorSpec:
+    """미니맵의 내 캐릭터 표식(노랑)."""
+    return ColorSpec(lower=[18, 110, 130], upper=[35, 255, 255], min_area=2)
+
+
+@dataclass
+class MinimapConfig:
+    """미니맵 색상으로 룬 위치를 찾는 방식 설정.
+
+    룬이 화면 밖에 있어도 미니맵에는 표시되므로, 미니맵의 룬 표식(보라)과
+    캐릭터 표식(노랑)의 좌표 차이를 보고 이동한다.
+    """
+
+    enabled: bool = False
+    roi: Roi = field(default_factory=lambda: Roi(0.0, 0.0, 0.22, 0.20))
+    rune_color: ColorSpec = field(default_factory=_purple)
+    char_color: ColorSpec = field(default_factory=_yellow)
+    align_tolerance: int = 2               # 좌우 정렬 허용 오차(미니맵 px)
+    vertical_tolerance: int = 2            # 높이 허용 오차(미니맵 px)
+    ms_per_px: float = 45.0                # 미니맵 1px 이동에 필요한 방향키 유지 시간
+    min_hold_ms: int = 60
+    max_hold_ms: int = 800
+    max_seconds: float = 25.0              # 정렬 포기 시간
+    settle: float = 0.12                   # 이동 후 표식이 갱신될 때까지 대기
+    auto_calibrate: bool = True            # 실제 이동량으로 ms_per_px 자동 보정
+    use_rope: bool = True                  # 위로 올라갈 때 로프 커넥트 사용
+    jump_down: bool = True                 # 아래로 내려갈 때 아래+점프 사용
+
+
+@dataclass
 class RuneConfig:
     enabled: bool = True
+    source: str = "template"               # "template" = 화면의 룬 이미지, "minimap" = 미니맵 색상
     check_interval: float = 0.6            # 룬 탐색 주기(초)
     rune_templates: list[str] = field(default_factory=lambda: ["rune.png"])
     rune_threshold: float = 0.72
@@ -138,6 +189,11 @@ class RuneConfig:
     scales: list[float] = field(default_factory=lambda: [1.0])
     detect_scale: float = 1.0              # 1.0=원본. 0.5 로 줄이면 룬 탐색이 3~4배 빨라진다
     approach: ApproachConfig = field(default_factory=ApproachConfig)
+    minimap: MinimapConfig = field(default_factory=MinimapConfig)
+
+    @property
+    def use_minimap(self) -> bool:
+        return self.source == "minimap" and self.minimap.enabled
 
 
 @dataclass
@@ -273,6 +329,12 @@ _RESOLVED_TYPES: dict[tuple[str, str], Any] = {
     ("RuneConfig", "rune_roi"): Roi,
     ("RuneConfig", "arrow_roi"): Roi,
     ("RuneConfig", "approach"): ApproachConfig,
+    ("RuneConfig", "minimap"): MinimapConfig,
+    ("MinimapConfig", "roi"): Roi,
+    ("MinimapConfig", "rune_color"): ColorSpec,
+    ("MinimapConfig", "char_color"): ColorSpec,
+    ("ColorSpec", "lower"): list[int],
+    ("ColorSpec", "upper"): list[int],
     ("RuneConfig", "rune_templates"): list[str],
     ("RuneConfig", "scales"): list[float],
     ("GeneralConfig", "window_titles"): list[str],

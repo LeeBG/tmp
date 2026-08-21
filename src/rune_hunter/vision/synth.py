@@ -86,6 +86,47 @@ def _background(width: int, height: int, seed: int = 0) -> np.ndarray:
     return cv2.add(img, noise)
 
 
+MINIMAP_RECT = (12, 12, 180, 110)  # (x, y, w, h) 화면 좌상단
+MINIMAP_RUNE_BGR = (200, 40, 190)  # 보라색 룬 표식
+MINIMAP_CHAR_BGR = (40, 230, 250)  # 노란색 캐릭터 표식
+
+
+def color_from_spec(spec) -> tuple[int, int, int]:
+    """설정된 HSV 범위의 중앙값을 BGR 색으로 바꾼다.
+
+    데모 화면의 표식을 사용자가 설정한 색 범위에 맞춰 그리기 위한 것.
+    (사용자가 실제 게임 화면에서 색을 추출해 두었어도 데모가 그대로 동작한다)
+    """
+    h = int((spec.lower[0] + spec.upper[0]) / 2)
+    s = int(min(255, max(spec.lower[1] + 60, (spec.lower[1] + spec.upper[1]) / 2)))
+    v = int(min(255, max(spec.lower[2] + 60, (spec.lower[2] + spec.upper[2]) / 2)))
+    bgr = cv2.cvtColor(np.uint8([[[h, s, v]]]), cv2.COLOR_HSV2BGR)[0][0]
+    return int(bgr[0]), int(bgr[1]), int(bgr[2])
+
+
+def draw_minimap(
+    canvas: np.ndarray,
+    char: tuple[int, int] | None = None,
+    rune: tuple[int, int] | None = None,
+    rect: tuple[int, int, int, int] = MINIMAP_RECT,
+    rune_bgr: tuple[int, int, int] = MINIMAP_RUNE_BGR,
+    char_bgr: tuple[int, int, int] = MINIMAP_CHAR_BGR,
+) -> None:
+    """미니맵 패널과 표식을 그린다. char/rune 좌표는 미니맵 내부 좌표."""
+    x, y, w, h = rect
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), (48, 42, 40), -1)
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), (110, 100, 95), 1)
+    for i in range(3):  # 지형처럼 보이는 선
+        line_y = y + int(h * (0.35 + 0.2 * i))
+        cv2.line(canvas, (x + 6, line_y), (x + w - 6, line_y), (90, 84, 80), 1)
+    if rune is not None:
+        cx, cy = x + rune[0], y + rune[1]
+        cv2.rectangle(canvas, (cx - 2, cy - 2), (cx + 2, cy + 2), rune_bgr, -1)
+    if char is not None:
+        cx, cy = x + char[0], y + char[1]
+        cv2.rectangle(canvas, (cx - 1, cy - 1), (cx + 1, cy + 1), char_bgr, -1)
+
+
 def render_screen(
     width: int = 1024,
     height: int = 768,
@@ -95,6 +136,11 @@ def render_screen(
     arrow_y_ratio: float = 0.12,
     arrow_spacing: int = 66,
     noise: float = 0.0,
+    minimap_char: tuple[int, int] | None = None,
+    minimap_rune: tuple[int, int] | None = None,
+    minimap_rect: tuple[int, int, int, int] | None = None,
+    minimap_rune_bgr: tuple[int, int, int] = MINIMAP_RUNE_BGR,
+    minimap_char_bgr: tuple[int, int, int] = MINIMAP_CHAR_BGR,
 ) -> np.ndarray:
     """가짜 게임 화면 한 장을 만든다.
 
@@ -119,6 +165,17 @@ def render_screen(
         rng = np.random.default_rng(seed + 7)
         extra = rng.normal(0, noise * 255, img.shape).astype(np.int16)
         img = np.clip(img.astype(np.int16) + extra, 0, 255).astype(np.uint8)
+
+    # 미니맵은 노이즈 뒤에 그린다 (실제 게임에서도 UI 는 선명하다)
+    if minimap_char is not None or minimap_rune is not None or minimap_rect is not None:
+        draw_minimap(
+            img,
+            char=minimap_char,
+            rune=minimap_rune,
+            rect=minimap_rect or MINIMAP_RECT,
+            rune_bgr=minimap_rune_bgr,
+            char_bgr=minimap_char_bgr,
+        )
     return img
 
 

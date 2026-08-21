@@ -143,15 +143,22 @@ def run_headless(config: AppConfig, bus: EventBus, seconds: float) -> int:
     """GUI 없이 데모 세계에서 엔진을 돌려 동작을 확인한다."""
     import time
 
-    from .demo import DemoWorld
+    from .demo import DemoSettings, DemoWorld
     from .engine import MacroEngine
     from .inputs import RecordingBackend
     from .platform_layer.windows import VirtualWindowLocator
     from .vision import RuneVision
     from .vision.matcher import template_from_array
-    from .vision.synth import demo_templates
+    from .vision.synth import color_from_spec, demo_templates
 
-    world = DemoWorld(bus=bus)
+    settings = DemoSettings(activate_key=config.rune.activate_key)
+    if config.rune.use_minimap:
+        mm = config.rune.minimap
+        settings.minimap_rect = mm.roi.to_pixels(settings.width, settings.height)
+        settings.minimap_rune_bgr = color_from_spec(mm.rune_color)
+        settings.minimap_char_bgr = color_from_spec(mm.char_color)
+        settings.max_offset_x = 420
+    world = DemoWorld(bus=bus, settings=settings)
     backend = RecordingBackend(sink=world.on_key)
     vision = RuneVision(config)
     for name, image in demo_templates().items():

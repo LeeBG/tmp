@@ -114,6 +114,7 @@
   },
   "rune": {
     "enabled": true,
+    "source": "minimap",
     "check_interval": 0.6,
     "rune_templates": [
       "rune.png"
@@ -139,7 +140,7 @@
       "h": 0.3
     },
     "arrow_count": 4,
-    "activate_key": "UP",
+    "activate_key": "SPACE",
     "activate_taps": 2,
     "activate_gap": 0.45,
     "arrow_wait": 2.5,
@@ -164,6 +165,51 @@
       "max_hold_ms": 700,
       "max_seconds": 12.0,
       "vertical_tolerance": 60,
+      "use_rope": true,
+      "jump_down": true
+    },
+    "minimap": {
+      "enabled": true,
+      "roi": {
+        "x": 0.0117,
+        "y": 0.0156,
+        "w": 0.1758,
+        "h": 0.1432
+      },
+      "rune_color": {
+        "lower": [
+          125,
+          90,
+          80
+        ],
+        "upper": [
+          158,
+          255,
+          255
+        ],
+        "min_area": 3
+      },
+      "char_color": {
+        "lower": [
+          18,
+          110,
+          130
+        ],
+        "upper": [
+          35,
+          255,
+          255
+        ],
+        "min_area": 2
+      },
+      "align_tolerance": 2,
+      "vertical_tolerance": 2,
+      "ms_per_px": 45.0,
+      "min_hold_ms": 60,
+      "max_hold_ms": 800,
+      "max_seconds": 25.0,
+      "settle": 0.12,
+      "auto_calibrate": true,
       "use_rope": true,
       "jump_down": true
     }

@@ -25,6 +25,7 @@ from ..inputs.base import InputBackend
 from ..keys import ARROW_KEYS
 from ..logging_bus import EventBus
 from ..vision.matcher import Match
+from ..vision.minimap import MinimapVision
 from ..vision.rune import RuneVision
 from .clock import Clock, RealClock
 
@@ -65,6 +66,7 @@ class RuneSolver:
         bus: EventBus,
         clock: Clock | None = None,
         abort: Callable[[], bool] | None = None,
+        minimap: MinimapVision | None = None,
     ) -> None:
         self.config = config
         self.vision = vision
@@ -73,6 +75,7 @@ class RuneSolver:
         self.bus = bus
         self.clock = clock or RealClock()
         self._abort = abort or (lambda: False)
+        self.minimap = minimap or MinimapVision(config)
 
     # --- 공개 API -------------------------------------------------------
     def solve(self, known_rune: Match | None = None) -> RuneAttempt:
@@ -89,24 +92,40 @@ class RuneSolver:
     # --- 내부 단계 -------------------------------------------------------
     def _solve(self, started: float, known_rune: Match | None) -> RuneAttempt:
         cfg = self.config.rune
-        rune = known_rune
-        if rune is None:
+
+        if cfg.use_minimap:
             frame = self.frames()
-            rune = self.vision.detect_rune(frame) if frame is not None else None
-        if rune is None:
-            return self._done(RuneOutcome.NO_RUNE, started)
-
-        self.bus.warn(
-            f"룬 감지 (점수 {rune.score:.2f}, 위치 {rune.center}) → 스킬 입력 중단, 룬 해제 집중"
-        )
-
-        if cfg.approach.enabled:
-            ok, detail = self._approach(started)
+            reading = self.minimap.read(frame) if frame is not None else None
+            if reading is None or reading.rune is None:
+                return self._done(RuneOutcome.NO_RUNE, started)
+            self.bus.warn(
+                f"미니맵에서 룬 발견 ({reading.describe()}) → 스킬 입력 중단, 룬 해제 집중"
+            )
+            ok, detail = self._approach_minimap(started)
             if self._abort():
                 return self._done(RuneOutcome.ABORTED, started)
             if not ok:
                 self.bus.warn(f"룬 접근 실패: {detail}")
                 return self._done(RuneOutcome.APPROACH_TIMEOUT, started, detail=detail)
+        else:
+            rune = known_rune
+            if rune is None:
+                frame = self.frames()
+                rune = self.vision.detect_rune(frame) if frame is not None else None
+            if rune is None:
+                return self._done(RuneOutcome.NO_RUNE, started)
+
+            self.bus.warn(
+                f"룬 감지 (점수 {rune.score:.2f}, 위치 {rune.center}) → 스킬 입력 중단, 룬 해제 집중"
+            )
+
+            if cfg.approach.enabled:
+                ok, detail = self._approach(started)
+                if self._abort():
+                    return self._done(RuneOutcome.ABORTED, started)
+                if not ok:
+                    self.bus.warn(f"룬 접근 실패: {detail}")
+                    return self._done(RuneOutcome.APPROACH_TIMEOUT, started, detail=detail)
 
         last_outcome = RuneOutcome.ACTIVATE_TIMEOUT
         last_arrows: list[str] = []
@@ -203,6 +222,84 @@ class RuneSolver:
 
         return False, f"{cfg.max_seconds:.0f}초 내 접근 실패"
 
+    def _approach_minimap(self, started: float) -> tuple[bool, str]:
+        """미니맵의 노란 캐릭터 표식이 보라색 룬 표식을 덮을 때까지 이동한다.
+
+        미니맵 1픽셀이 실제로 몇 ms 이동인지는 맵마다 다르므로, 이동할 때마다
+        '누른 시간 ÷ 실제로 줄어든 픽셀' 을 측정해 계수를 스스로 보정한다.
+        """
+        cfg = self.config.rune.minimap
+        keys = self.config.keys
+        deadline = started + cfg.max_seconds
+        ms_per_px = max(1.0, cfg.ms_per_px)
+        pending: tuple[int, int] | None = None  # (누른 시간, 이동 전 dx)
+        stuck = 0
+        last: str = "시작 전"
+
+        while self.clock.now() < deadline:
+            if self._abort():
+                return False, "사용자 중단"
+            frame = self.frames()
+            if frame is None:
+                return False, "화면 캡처 실패"
+            reading = self.minimap.read(frame)
+            if reading.rune is None:
+                return False, "미니맵에서 룬 표식이 사라졌습니다"
+            if reading.char is None:
+                return False, "미니맵에서 캐릭터 표식을 찾지 못했습니다 (캐릭터 색 설정 확인)"
+
+            dx, dy = int(reading.dx), int(reading.dy)  # type: ignore[arg-type]
+            last = f"dx {dx}, dy {dy}"
+
+            if pending is not None:
+                held_ms, before = pending
+                pending = None
+                moved = abs(before - dx)
+                if moved >= 1:
+                    stuck = 0
+                    if cfg.auto_calibrate:
+                        measured = held_ms / moved
+                        ms_per_px = min(400.0, max(5.0, ms_per_px * 0.6 + measured * 0.4))
+                else:
+                    stuck += 1
+                    if stuck >= 4:
+                        return False, f"이동해도 미니맵 표식이 변하지 않습니다 ({last})"
+
+            if abs(dx) <= cfg.align_tolerance and abs(dy) <= cfg.vertical_tolerance:
+                self.bus.debug(f"미니맵 정렬 완료 ({last}, 계수 {ms_per_px:.0f}ms/px)")
+                return True, "정렬 완료"
+
+            if abs(dx) > cfg.align_tolerance:
+                hold = int(
+                    min(cfg.max_hold_ms, max(cfg.min_hold_ms, abs(dx) * ms_per_px))
+                )
+                key = keys.right if dx > 0 else keys.left
+                self.bus.debug(
+                    f"미니맵 이동: {'오른쪽' if dx > 0 else '왼쪽'} {hold}ms ({last})"
+                )
+                self.inputs.hold(key, hold, sleeper=self.clock.sleep)
+                pending = (hold, dx)
+                self.clock.sleep(cfg.settle)
+                continue
+
+            if dy < -cfg.vertical_tolerance:  # 룬이 위쪽
+                if cfg.use_rope:
+                    self.bus.debug(f"미니맵 이동: 로프 커넥트로 상승 ({last})")
+                    self.inputs.tap(keys.rope, 60, sleeper=self.clock.sleep)
+                    self.clock.sleep(0.9)
+                else:
+                    self.bus.debug(f"미니맵 이동: 점프로 상승 ({last})")
+                    self.inputs.tap(keys.jump, 60, sleeper=self.clock.sleep)
+                    self.clock.sleep(0.5)
+            elif dy > cfg.vertical_tolerance and cfg.jump_down:  # 룬이 아래쪽
+                self.bus.debug(f"미니맵 이동: 아래 점프 ({last})")
+                self.inputs.chord([keys.down, keys.jump], 70, sleeper=self.clock.sleep)
+                self.clock.sleep(0.6)
+            else:
+                self.clock.sleep(0.1)
+
+        return False, f"{cfg.max_seconds:.0f}초 내 정렬 실패 ({last})"
+
     def _activate(self):
         cfg = self.config.rune
         for attempt in range(max(1, cfg.activate_taps)):
@@ -293,10 +390,16 @@ class RuneSolver:
         rune_deadline = self.clock.now() + max(1.0, cfg.confirm_timeout / 2)
         while self.clock.now() < rune_deadline:
             frame = self.frames()
-            if frame is not None and self.vision.detect_rune(frame) is None:
+            if frame is not None and not self._rune_visible(frame):
                 return "success"
             self.clock.sleep(0.15)
         return "rune_remains"
+
+    def _rune_visible(self, frame) -> bool:
+        """룬이 아직 남아 있는지 (감지 방식에 맞춰 판단)."""
+        if self.config.rune.use_minimap:
+            return self.minimap.read(frame).rune is not None
+        return self.vision.detect_rune(frame) is not None
 
     def _done(
         self,

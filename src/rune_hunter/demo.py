@@ -44,6 +44,12 @@ class DemoSettings:
     solve_delay: float = 0.3
     char_x_ratio: float = 0.5
     char_y_ratio: float = 0.55
+    # --- 미니맵 시뮬레이션 --------------------------------------------
+    minimap: bool = True
+    minimap_scale: float = 14.0                       # 미니맵 1px = 실제 몇 px
+    minimap_rect: tuple[int, int, int, int] | None = None  # None 이면 기본 위치
+    minimap_rune_bgr: tuple[int, int, int] = synth.MINIMAP_RUNE_BGR
+    minimap_char_bgr: tuple[int, int, int] = synth.MINIMAP_CHAR_BGR
 
 
 @dataclass
@@ -175,17 +181,46 @@ class DemoWorld:
         if self.rune_present:
             cx = int(s.width * s.char_x_ratio) + self.rune_offset[0]
             cy = int(s.height * s.char_y_ratio) - self.rune_offset[1]
-            cx = max(40, min(s.width - 40, cx))
-            cy = max(40, min(s.height - 40, cy))
-            rune_pos = (cx, cy)
+            # 화면을 벗어난 룬은 그리지 않는다 (미니맵에만 보이는 상황 재현)
+            if 40 <= cx <= s.width - 40 and 40 <= cy <= s.height - 40:
+                rune_pos = (cx, cy)
         self.frames_rendered += 1
+
+        char_marker = rune_marker = None
+        if s.minimap:
+            char_marker, rune_marker = self._minimap_markers()
+
         return synth.render_screen(
             width=s.width,
             height=s.height,
             rune_pos=rune_pos,
             arrows=self.arrows,
             seed=self.frames_rendered % 5,
+            minimap_char=char_marker,
+            minimap_rune=rune_marker,
+            minimap_rect=self.minimap_rect if s.minimap else None,
+            minimap_rune_bgr=s.minimap_rune_bgr,
+            minimap_char_bgr=s.minimap_char_bgr,
         )
+
+    @property
+    def minimap_rect(self) -> tuple[int, int, int, int]:
+        return self.settings.minimap_rect or synth.MINIMAP_RECT
+
+    def _minimap_markers(self) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+        """캐릭터는 미니맵 중앙, 룬은 상대 위치에 배치한다."""
+        _, _, mw, mh = self.minimap_rect
+        char = (mw // 2, mh // 2)
+        if not self.rune_present:
+            return char, None
+        scale = max(1.0, self.settings.minimap_scale)
+        dx = int(round(self.rune_offset[0] / scale))
+        dy = int(round(-self.rune_offset[1] / scale))  # 미니맵 y 는 아래로 증가
+        rune = (
+            max(4, min(mw - 4, char[0] + dx)),
+            max(4, min(mh - 4, char[1] + dy)),
+        )
+        return char, rune
 
     def grab(self, region: tuple[int, int, int, int]) -> Frame:  # noqa: ARG002
         return Frame(image=self.render())

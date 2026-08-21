@@ -55,6 +55,51 @@ def test_window_builds_and_collects(app, tmp_path):
         window.close()
 
 
+def test_minimap_controls_round_trip(app, tmp_path):
+    config = AppConfig()
+    window = MainWindow(config, EventBus(), demo=True)
+    try:
+        window.source_minimap.setChecked(True)
+        window.mm_tolerance.setValue(3)
+        window.mm_ms_per_px.setValue(60.0)
+        window.mm_max_hold.setValue(500)
+        window.mm_auto.setChecked(False)
+        window.activate_key.select("SPACE")
+        window.collect()
+
+        assert config.rune.source == "minimap"
+        assert config.rune.use_minimap is True
+        assert config.rune.minimap.align_tolerance == 3
+        assert config.rune.minimap.ms_per_px == pytest.approx(60.0)
+        assert config.rune.minimap.auto_calibrate is False
+        assert config.rune.activate_key == "SPACE"
+
+        path = config.save(tmp_path / "mm.json")
+        loaded = AppConfig.load(path)
+        assert loaded.rune.use_minimap is True
+        assert loaded.rune.minimap.ms_per_px == pytest.approx(60.0)
+        assert loaded.rune.minimap.rune_color.lower == config.rune.minimap.rune_color.lower
+    finally:
+        window.close()
+
+
+def test_minimap_test_button_reports_markers(app):
+    """데모 모드에서 미니맵 인식 테스트가 좌표를 보고해야 한다."""
+    bus = EventBus()
+    config = AppConfig()
+    config.rune.source = "minimap"
+    config.rune.minimap.enabled = True
+    window = MainWindow(config, bus, demo=True)
+    try:
+        window.source_minimap.setChecked(True)
+        window._test_minimap()
+        messages = [e.message for e in bus.drain()]
+        assert any("미니맵" in m for m in messages)
+        assert any("캐릭터" in m or "룬" in m for m in messages)
+    finally:
+        window.close()
+
+
 def test_log_view_receives_bus_events(app):
     bus = EventBus()
     window = MainWindow(AppConfig(), bus, demo=True)
