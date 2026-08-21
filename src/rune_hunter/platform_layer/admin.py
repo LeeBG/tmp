@@ -23,15 +23,28 @@ def is_admin() -> bool:
         return False
 
 
+def relaunch_arguments(extra_args: list[str] | None = None) -> list[str]:
+    """승격 재실행에 쓸 인터프리터 인자를 만든다.
+
+    `python -m rune_hunter` 로 시작한 경우 sys.argv[0] 은 패키지 안의 __main__.py 라서
+    그 파일을 직접 실행하면 상대 임포트가 깨진다. 그래서 -m 형태를 유지한다.
+    """
+    script = os.path.basename(sys.argv[0] or "")
+    if script == "__main__.py":
+        head = ["-m", "rune_hunter"]
+    else:
+        head = [os.path.abspath(sys.argv[0])]
+    return [*head, *sys.argv[1:], *(extra_args or [])]
+
+
 def relaunch_as_admin(extra_args: list[str] | None = None) -> bool:
     """UAC 승격으로 자신을 다시 실행한다. 성공하면 True (호출자는 종료해야 함)."""
     if not IS_WINDOWS or is_admin():
         return False
-    args = [*sys.argv[1:], *(extra_args or [])]
-    params = " ".join(f'"{a}"' for a in [os.path.abspath(sys.argv[0]), *args])
+    params = " ".join(f'"{a}"' for a in relaunch_arguments(extra_args))
     try:
         rc = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, params, None, 1
+            None, "runas", sys.executable, params, os.getcwd(), 1
         )
     except Exception:
         return False

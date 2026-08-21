@@ -59,6 +59,17 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
 
 
+def key_flags(name: str, down: bool) -> tuple[int, int]:
+    """키 이름 -> (스캔코드, SendInput 플래그). 순수 함수라 테스트가 쉽다."""
+    keydef = resolve(name)
+    flags = KEYEVENTF_SCANCODE
+    if keydef.extended:
+        flags |= KEYEVENTF_EXTENDEDKEY
+    if not down:
+        flags |= KEYEVENTF_KEYUP
+    return keydef.scan, flags
+
+
 class SendInputBackend(InputBackend):
     def __init__(self) -> None:
         super().__init__()
@@ -72,18 +83,13 @@ class SendInputBackend(InputBackend):
         self.failures = 0
 
     def _send(self, key: str, down: bool) -> None:
-        keydef = resolve(key)
-        flags = KEYEVENTF_SCANCODE
-        if keydef.extended:
-            flags |= KEYEVENTF_EXTENDEDKEY
-        if not down:
-            flags |= KEYEVENTF_KEYUP
+        scan, flags = key_flags(key, down)
         payload = _INPUT(
             type=INPUT_KEYBOARD,
             union=_INPUTUNION(
                 ki=_KEYBDINPUT(
                     wVk=0,
-                    wScan=keydef.scan,
+                    wScan=scan,
                     dwFlags=flags,
                     time=0,
                     dwExtraInfo=None,

@@ -82,6 +82,16 @@ def bench_vision(iters: int, live: bool) -> None:
         samples.append((time.perf_counter() - t0) * 1000)
     print(f"[룬 감지] 전체 영역   {_stats(samples)}")
 
+    config.rune.detect_scale = 0.5
+    samples = []
+    for i in range(iters):
+        frame = frames[i % len(frames)]
+        t0 = time.perf_counter()
+        vision.detect_rune(frame)
+        samples.append((time.perf_counter() - t0) * 1000)
+    print(f"[룬 감지] 축소 0.5배  {_stats(samples)}")
+    config.rune.detect_scale = 1.0
+
     config.rune.rune_roi = Roi(0.15, 0.25, 0.7, 0.5)
     samples = []
     for i in range(iters):
