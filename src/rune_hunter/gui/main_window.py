@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from ..config import (
     DEFAULT_PROFILE_PATH,
     DEFAULT_TEMPLATE_DIR,
+    LOG_DIR,
     AppConfig,
     Roi,
 )
@@ -944,6 +945,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "영역 없음", "선택된 영역이 없습니다.")
             return
         spec = MinimapVision.sample_color(crop)
+        other = (
+            self.config.rune.minimap.char_color
+            if target == "rune"
+            else self.config.rune.minimap.rune_color
+        )
         if target == "rune":
             self.config.rune.minimap.rune_color = spec
             self.mm_rune_color_label.setText(spec.describe())
@@ -951,6 +957,18 @@ class MainWindow(QMainWindow):
             self.config.rune.minimap.char_color = spec
             self.mm_char_color_label.setText(spec.describe())
         self.bus.ok(f"{label} 색 범위 설정: {spec.describe()}")
+
+        if MinimapVision.ranges_overlap(spec, other):
+            message = (
+                "룬 색과 캐릭터 색 범위가 겹칩니다.\n\n"
+                "이 상태면 같은 표식을 둘 다로 인식해서 좌우 차이(dx)가 항상 0 으로 나오고,\n"
+                "정렬된 것으로 착각해 룬 해제가 실패합니다.\n\n"
+                f"룬: {self.config.rune.minimap.rune_color.describe()}\n"
+                f"캐릭터: {self.config.rune.minimap.char_color.describe()}\n\n"
+                "각 표식의 색만 담기도록 더 작게 드래그해서 다시 추출해 주세요."
+            )
+            self.bus.error("룬 색과 캐릭터 색 범위가 겹칩니다 — 각각 다시 추출하세요.")
+            QMessageBox.warning(self, "색 범위가 겹칩니다", message)
 
     def _test_minimap(self) -> None:
         from ..vision.minimap import MinimapVision
@@ -961,16 +979,29 @@ class MainWindow(QMainWindow):
             return
         import time
 
+        vision = MinimapVision(self.config)
         t0 = time.perf_counter()
-        reading = MinimapVision(self.config).read(frame)
+        reading = vision.read(frame)
         ms = (time.perf_counter() - t0) * 1000
-        if reading.found:
+
+        if reading.ambiguous:
+            self.bus.error(f"미니맵 인식 오류 — {reading.describe()} ({ms:.1f}ms)")
+            self.bus.error("룬 색과 캐릭터 색을 각각 다시 추출해야 합니다.")
+        elif reading.found:
             self.bus.ok(f"미니맵 인식 성공 — {reading.describe()} ({ms:.1f}ms)")
-            tol = self.config.rune.minimap.align_tolerance
+            tol = max(0.5, float(self.config.rune.minimap.align_tolerance))
             if abs(reading.dx or 0) <= tol:
                 self.bus.info("현재 캐릭터가 룬과 좌우로 정렬된 상태입니다.")
         else:
             self.bus.warn(f"{reading.describe()} ({ms:.1f}ms) — 미니맵 영역과 색 설정을 확인하세요.")
+
+        # 매크로가 실제로 무엇을 보고 있는지 그림으로 남긴다
+        try:
+            path = LOG_DIR / "minimap_debug.png"
+            save_png(vision.debug_image(frame), path)
+            self.bus.info(f"미니맵 진단 이미지 저장: {path} (빨강=룬, 초록=캐릭터)")
+        except Exception as exc:
+            self.bus.warn(f"진단 이미지 저장 실패: {exc}")
 
     def _test_arrows(self) -> None:
         self.collect()

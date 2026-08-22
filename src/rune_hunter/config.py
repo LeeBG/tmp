@@ -153,6 +153,8 @@ class MinimapConfig:
     auto_calibrate: bool = True            # 실제 이동량으로 ms_per_px 자동 보정
     use_rope: bool = True                  # 위로 올라갈 때 로프 커넥트 사용
     jump_down: bool = True                 # 아래로 내려갈 때 아래+점프 사용
+    nudge_ms: int = 80                     # 활성화 실패 시 미세 이동 시간
+    screen_fine_align: bool = True         # 룬이 화면에 보이면 템플릿으로 최종 미세 정렬
 
 
 @dataclass

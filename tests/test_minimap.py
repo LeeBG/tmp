@@ -124,7 +124,7 @@ def test_sample_color_from_marker_crop(mm_config):
 
     # 미니맵 좌표 → 화면 좌표로 옮겨서 표식 주변을 잘라낸다
     x, y, _, _ = reading.roi
-    cx, cy = x + rune.cx, y + rune.cy
+    cx, cy = int(round(x + rune.cx)), int(round(y + rune.cy))
     crop = frame[cy - 2 : cy + 3, cx - 2 : cx + 3]
 
     spec = MinimapVision.sample_color(crop)
@@ -242,6 +242,112 @@ def test_reports_missing_character_marker(mm_config):
     attempt = solver_for(mm_config, world, clock, backend).solve()
     assert attempt.outcome is RuneOutcome.APPROACH_TIMEOUT
     assert "캐릭터" in attempt.detail
+
+
+def test_sample_color_ignores_dark_background(mm_config):
+    """배경이 대부분인 영역을 드래그해도 표식 색을 뽑아야 한다."""
+    import numpy as np
+
+    from rune_hunter.vision.synth import MINIMAP_RUNE_BGR
+
+    crop = np.full((7, 7, 3), (48, 42, 40), dtype=np.uint8)  # 미니맵 배경
+    crop[3:5, 3:5] = MINIMAP_RUNE_BGR                        # 가운데 표식 몇 픽셀
+
+    spec = MinimapVision.sample_color(crop)
+    mm_config.rune.minimap.rune_color = spec
+
+    clock = ManualClock()
+    world = build_world(clock, offset=(280, 0))
+    reading = MinimapVision(mm_config).read(world.render())
+    assert reading.rune is not None, f"배경 색을 뽑았다: {spec.describe()}"
+    assert reading.ambiguous is False
+    assert reading.dx == pytest.approx(20, abs=2)
+
+
+def test_detects_overlapping_color_ranges(mm_config):
+    """룬 색과 캐릭터 색이 같은 표식을 가리키면 정렬 완료로 착각하면 안 된다."""
+    clock = ManualClock()
+    world = build_world(clock, offset=(300, 0))
+    # 실수 재현: 룬 색을 캐릭터(노랑) 범위로 잡아버린 경우
+    mm_config.rune.minimap.rune_color = mm_config.rune.minimap.char_color
+
+    reading = MinimapVision(mm_config).read(world.render())
+    assert reading.found
+    assert reading.dx == pytest.approx(0, abs=0.5)  # 같은 표식이라 차이가 없다
+    assert reading.ambiguous is True
+    assert reading.overlap > 0.5
+    assert reading.usable is False
+    assert "겹칩니다" in reading.describe()
+
+
+def test_ambiguous_colors_abort_with_clear_message(mm_config):
+    clock = ManualClock()
+    world = build_world(clock, offset=(300, 0))
+    mm_config.rune.minimap.rune_color = mm_config.rune.minimap.char_color
+    backend = RecordingBackend(sink=world.on_key)
+
+    attempt = solver_for(mm_config, world, clock, backend).solve()
+    assert attempt.outcome is RuneOutcome.NO_RUNE or "겹" in attempt.detail
+    assert world.solved == 0
+
+
+def test_rune_present_is_false_when_colors_are_ambiguous(mm_config):
+    clock = ManualClock()
+    world = build_world(clock, offset=(300, 0))
+    mm_config.rune.minimap.rune_color = mm_config.rune.minimap.char_color
+    assert MinimapVision(mm_config).rune_present(world.render()) is False
+
+
+def test_ranges_overlap_helper(mm_config):
+    mm = mm_config.rune.minimap
+    assert MinimapVision.ranges_overlap(mm.rune_color, mm.rune_color) is True
+    assert MinimapVision.ranges_overlap(mm.rune_color, mm.char_color) is False
+
+
+def test_zero_tolerance_still_completes(mm_config):
+    """허용 오차를 0 으로 둬도 무한 루프에 빠지지 않아야 한다."""
+    mm_config.rune.minimap.align_tolerance = 0
+    mm_config.rune.minimap.vertical_tolerance = 0
+    clock = ManualClock()
+    world = build_world(clock, offset=(200, 0))
+    backend = RecordingBackend(sink=world.on_key)
+
+    attempt = solver_for(mm_config, world, clock, backend).solve()
+    assert attempt.outcome is RuneOutcome.SUCCESS
+
+
+def test_subpixel_marker_coordinates(mm_config):
+    """좌표가 소수점까지 유지되어야 미세한 차이를 구분할 수 있다."""
+    clock = ManualClock()
+    world = build_world(clock, offset=(210, 0))  # 210/14 = 15px
+    reading = MinimapVision(mm_config).read(world.render())
+    assert isinstance(reading.dx, float)
+    assert reading.dx == pytest.approx(15, abs=1.5)
+
+
+def test_debug_image_marks_both_markers(mm_config):
+    clock = ManualClock()
+    world = build_world(clock, offset=(280, 0))
+    image = MinimapVision(mm_config).debug_image(world.render(), scale=4)
+    _, _, w, h = mm_config.rune.minimap.roi.to_pixels(1024, 768)
+    assert image.shape[0] == h * 4 and image.shape[1] == w * 4
+
+
+def test_nudges_and_retries_when_activation_fails(mm_config, bus):
+    """정렬 후에도 스페이스바가 안 먹으면 미세 이동 후 다시 시도해야 한다."""
+    clock = ManualClock()
+    # 활성화 반경을 아주 좁혀서 첫 시도가 실패하도록 만든다
+    settings = DemoSettings(
+        first_rune_after=0.0, activate_key="SPACE", activate_radius_x=8
+    )
+    world = build_world(clock, offset=(30, 0), settings=settings)
+    mm_config.rune.activate_taps = 4
+    mm_config.rune.minimap.nudge_ms = 60
+    backend = RecordingBackend(sink=world.on_key)
+
+    attempt = solver_for(mm_config, world, clock, backend).solve()
+    assert world.activate_presses >= 2, "활성화를 여러 번 시도해야 한다"
+    assert attempt.outcome in (RuneOutcome.SUCCESS, RuneOutcome.ACTIVATE_TIMEOUT)
 
 
 def test_does_not_move_when_already_aligned(mm_config):

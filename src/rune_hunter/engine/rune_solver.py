@@ -107,6 +107,7 @@ class RuneSolver:
             if not ok:
                 self.bus.warn(f"룬 접근 실패: {detail}")
                 return self._done(RuneOutcome.APPROACH_TIMEOUT, started, detail=detail)
+            self._fine_align_on_screen()
         elif cfg.use_banner:
             frame = self.frames()
             banner = self.vision.detect_banner(frame) if frame is not None else None
@@ -257,9 +258,14 @@ class RuneSolver:
                 return False, "미니맵에서 룬 표식이 사라졌습니다"
             if reading.char is None:
                 return False, "미니맵에서 캐릭터 표식을 찾지 못했습니다 (캐릭터 색 설정 확인)"
+            if reading.ambiguous:
+                return False, (
+                    f"룬 색과 캐릭터 색 범위가 {reading.overlap:.0%} 겹쳐 같은 표식을 가리킵니다 "
+                    "— ‘룬 색 추출’ 과 ‘캐릭터 색 추출’ 을 각각 다시 해주세요"
+                )
 
-            dx, dy = int(reading.dx), int(reading.dy)  # type: ignore[arg-type]
-            last = f"dx {dx}, dy {dy}"
+            dx, dy = float(reading.dx), float(reading.dy)  # type: ignore[arg-type]
+            last = f"dx {dx:+.1f}, dy {dy:+.1f}"
 
             if pending is not None:
                 held_ms, before = pending
@@ -275,11 +281,15 @@ class RuneSolver:
                     if stuck >= 4:
                         return False, f"이동해도 미니맵 표식이 변하지 않습니다 ({last})"
 
-            if abs(dx) <= cfg.align_tolerance and abs(dy) <= cfg.vertical_tolerance:
+            # 허용 오차 0 은 소수점 좌표에서 사실상 도달 불가라 최소값을 둔다
+            tolerance = max(0.5, float(cfg.align_tolerance))
+            v_tolerance = max(0.5, float(cfg.vertical_tolerance))
+
+            if abs(dx) <= tolerance and abs(dy) <= v_tolerance:
                 self.bus.debug(f"미니맵 정렬 완료 ({last}, 계수 {ms_per_px:.0f}ms/px)")
                 return True, "정렬 완료"
 
-            if abs(dx) > cfg.align_tolerance:
+            if abs(dx) > tolerance:
                 sign = 1 if dx > 0 else -1
                 if previous_sign and sign != previous_sign:
                     # 목표를 지나쳐 되돌아가는 중 → 이동량을 줄여 진동을 막는다
@@ -301,7 +311,7 @@ class RuneSolver:
                 self.clock.sleep(cfg.settle)
                 continue
 
-            if dy < -cfg.vertical_tolerance:  # 룬이 위쪽
+            if dy < -v_tolerance:  # 룬이 위쪽
                 if cfg.use_rope:
                     self.bus.debug(f"미니맵 이동: 로프 커넥트로 상승 ({last})")
                     self.inputs.tap(keys.rope, 60, sleeper=self.clock.sleep)
@@ -310,7 +320,7 @@ class RuneSolver:
                     self.bus.debug(f"미니맵 이동: 점프로 상승 ({last})")
                     self.inputs.tap(keys.jump, 60, sleeper=self.clock.sleep)
                     self.clock.sleep(0.5)
-            elif dy > cfg.vertical_tolerance and cfg.jump_down:  # 룬이 아래쪽
+            elif dy > v_tolerance and cfg.jump_down:  # 룬이 아래쪽
                 self.bus.debug(f"미니맵 이동: 아래 점프 ({last})")
                 self.inputs.chord([keys.down, keys.jump], 70, sleeper=self.clock.sleep)
                 self.clock.sleep(0.6)
@@ -319,9 +329,53 @@ class RuneSolver:
 
         return False, f"{cfg.max_seconds:.0f}초 내 정렬 실패 ({last})"
 
+    def _fine_align_on_screen(self) -> None:
+        """미니맵 정렬이 끝난 뒤, 룬이 화면에 보이면 템플릿으로 한 번 더 맞춘다.
+
+        미니맵은 1픽셀이 실제 수십 픽셀이라 그것만으로는 정밀도가 부족하다.
+        화면 좌표는 훨씬 촘촘하므로 마지막 정렬에 쓰면 성공률이 올라간다.
+        (룬 이미지가 없거나 화면에 안 보이면 조용히 넘어간다)
+        """
+        cfg = self.config.rune
+        if not cfg.minimap.screen_fine_align or not cfg.approach.enabled:
+            return
+        frame = self.frames()
+        if frame is None:
+            return
+        rune = self.vision.detect_rune(frame)
+        if rune is None:
+            return
+        self.bus.debug(f"화면에서 룬 확인 (점수 {rune.score:.2f}) → 템플릿으로 미세 정렬")
+        ok, detail = self._approach(self.clock.now())
+        if not ok:
+            self.bus.debug(f"화면 미세 정렬 생략: {detail}")
+
+    def _nudge(self, index: int) -> None:
+        """활성화가 안 되면 좌우로 아주 조금 움직여 위치를 다시 맞춘다.
+
+        룬은 정확히 겹쳐야 활성화되므로, 스페이스바가 안 먹으면 몇 픽셀 어긋난 것이다.
+        """
+        cfg = self.config.rune.minimap
+        if not self.config.rune.use_minimap or cfg.nudge_ms <= 0:
+            return
+        keys = self.config.keys
+        direction: str | None = None
+        frame = self.frames()
+        if frame is not None:
+            reading = self.minimap.read(frame)
+            if reading.usable and abs(reading.dx or 0) > 0.2:
+                direction = keys.right if (reading.dx or 0) > 0 else keys.left
+        if direction is None:  # 남은 오차가 없으면 좌우를 번갈아 시도
+            direction = keys.right if index % 2 == 0 else keys.left
+        step = int(cfg.nudge_ms * (1 + index // 2))
+        self.bus.debug(f"활성화 실패 → 미세 이동 {direction} {step}ms 후 재시도")
+        self.inputs.hold(direction, step, sleeper=self.clock.sleep)
+        self.clock.sleep(0.15)
+
     def _activate(self):
         cfg = self.config.rune
-        for attempt in range(max(1, cfg.activate_taps)):
+        attempts = max(1, cfg.activate_taps)
+        for attempt in range(attempts):
             if self._abort():
                 return None
             # 화살표 UI 가 이미 떠 있는데 활성화 키를 또 누르면 그 입력이 방향 입력으로
@@ -332,10 +386,12 @@ class RuneSolver:
                 return self._read_arrows(cfg.arrow_wait)
 
             self.inputs.tap(cfg.activate_key, 60, sleeper=self.clock.sleep)
-            self.bus.debug(f"룬 활성화 입력 {attempt + 1}/{cfg.activate_taps} ({cfg.activate_key})")
+            self.bus.debug(f"룬 활성화 입력 {attempt + 1}/{attempts} ({cfg.activate_key})")
             reading = self._read_arrows(cfg.activate_gap)
             if reading is not None:
                 return reading
+            if attempt < attempts - 1:
+                self._nudge(attempt)
         return self._read_arrows(cfg.arrow_wait)
 
     def _read_arrows(self, timeout: float):
