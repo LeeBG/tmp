@@ -643,13 +643,24 @@ class RuneSolver:
                 result.reading = reading
                 return result
 
-            changed = region_change_ratio(before, self._arrow_region(self.frames()))
+            # 대기가 끝난 직후에 UI 가 뜨는 수가 있다. 이때 미세 이동으로 방향키를 누르면
+            # 그 입력이 룬 방향 입력으로 들어가 순서가 통째로 어긋난다.
+            after = self.frames()
+            if after is not None and self.vision.arrows_visible(after):
+                self.bus.debug("대기 직후 방향 입력 UI 출현 — 미세 이동을 건너뛰고 판독한다")
+                result.ui_seen = True
+                result.reading = self._read_arrows(cfg.arrow_wait)
+                return result
+
+            changed = region_change_ratio(before, self._arrow_region(after))
             result.changed = max(result.changed, changed)
             if changed >= ARROW_UI_CHANGE_RATIO:
                 self.trace.ui_changed = True
                 self.bus.debug(
                     f"활성화 후 화살표 영역이 {changed:.0%} 바뀌었지만 화살표를 인식하지 못했습니다"
+                    " — 무언가 떴을 수 있어 미세 이동은 하지 않는다"
                 )
+                continue  # 화면이 변한 상태에서 방향키를 누르면 룬 입력으로 먹힐 수 있다
             if attempt < attempts - 1:
                 self._nudge(attempt)
 
