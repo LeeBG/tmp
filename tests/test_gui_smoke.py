@@ -100,6 +100,49 @@ def test_minimap_test_button_reports_markers(app):
         window.close()
 
 
+def test_diagnostics_button_reports_each_stage(app):
+    """진단 버튼은 설정 점검과 단계별 결과를 로그로 남겨야 한다."""
+    bus = EventBus()
+    config = AppConfig()
+    config.rune.source = "minimap"
+    config.rune.minimap.enabled = True
+    config.rune.activate_key = "UP"  # 설정 실수 재현
+    window = MainWindow(config, bus, demo=True)
+    try:
+        window._run_diagnostics()
+        messages = [e.message for e in bus.drain()]
+        assert any("룬 해제 진단 시작" in m for m in messages)
+        assert any("스페이스바" in m for m in messages), messages
+        assert any("방향별 최고 점수" in m for m in messages)
+        assert any("진단 결과" in m for m in messages)
+    finally:
+        window.close()
+
+
+def test_activation_settings_round_trip(app):
+    """스페이스바 문제 해결에 쓰는 항목들이 설정에 반영되어야 한다."""
+    config = AppConfig()
+    window = MainWindow(config, EventBus(), demo=True)
+    try:
+        window.activate_press.setValue(180)
+        window.activate_settle.setValue(0.45)
+        window.activate_gap.setValue(0.9)
+        window.activate_taps.setValue(4)
+        window.nudge_ms.setValue(120)
+        window.collect()
+
+        assert config.rune.activate_press_ms == 180
+        assert config.rune.activate_settle == pytest.approx(0.45)
+        assert config.rune.activate_gap == pytest.approx(0.9)
+        assert config.rune.activate_taps == 4
+        assert config.rune.minimap.nudge_ms == 120
+
+        window.refresh_from_config()
+        assert window.activate_press.value() == 180
+    finally:
+        window.close()
+
+
 def test_log_view_receives_bus_events(app):
     bus = EventBus()
     window = MainWindow(AppConfig(), bus, demo=True)

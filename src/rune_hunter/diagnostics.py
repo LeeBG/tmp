@@ -242,7 +242,8 @@ def diagnose_frame(config: AppConfig, frame: np.ndarray | None, vision, minimap=
             issues.append(
                 Issue(
                     "info",
-                    "미니맵에 룬 표식이 없습니다 — 지금 룬이 없거나, 캐릭터가 룬 위에 서서 가린 상태입니다.",
+                    f"미니맵에 룬 표식이 없습니다 (캐릭터 표식은 {reading.char.center} 에서 인식) "
+                    "— 지금 룬이 없거나, 캐릭터가 룬 위에 서서 가린 상태입니다.",
                 )
             )
         else:

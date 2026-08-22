@@ -30,6 +30,14 @@ def config() -> AppConfig:
     return cfg
 
 
+@pytest.fixture(autouse=True)
+def _isolated_log_dir(tmp_path, monkeypatch):
+    """테스트가 저장소의 logs/ 를 어지럽히지 않게 한다."""
+    from rune_hunter import diagnostics
+
+    monkeypatch.setattr(diagnostics, "LOG_DIR", tmp_path / "logs")
+
+
 @pytest.fixture
 def bus() -> EventBus:
     return EventBus()
