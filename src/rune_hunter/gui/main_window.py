@@ -370,7 +370,11 @@ class MainWindow(QMainWindow):
         solve_box = QGroupBox("해제 동작")
         solve_form = QFormLayout(solve_box)
         self.activate_key = KeySelect(rune.activate_key)
-        self.activate_taps = self._spin(rune.activate_taps, 1, 6, 1, " 회")
+        self.activate_taps = self._spin(rune.activate_taps, 1, 8, 1, " 회")
+        self.activate_press = self._spin(rune.activate_press_ms, 20, 500, 10, " ms")
+        self.activate_settle = self._dspin(rune.activate_settle, 0.0, 2.0, 0.05, " 초")
+        self.activate_gap = self._dspin(rune.activate_gap, 0.1, 3.0, 0.05, " 초")
+        self.nudge_ms = self._spin(rune.minimap.nudge_ms, 0, 500, 10, " ms")
         self.arrow_press = self._spin(rune.arrow_press_ms, 10, 300, 5, " ms")
         self.arrow_gap = self._dspin(rune.arrow_gap, 0.02, 1.5, 0.02, " 초")
         self.arrow_wait = self._dspin(rune.arrow_wait, 0.3, 10.0, 0.1, " 초")
@@ -379,7 +383,22 @@ class MainWindow(QMainWindow):
         self.cooldown_success = self._dspin(rune.cooldown_success, 0.0, 300.0, 1.0, " 초")
         self.cooldown_fail = self._dspin(rune.cooldown_fail, 0.0, 600.0, 5.0, " 초")
         solve_form.addRow("룬 활성화 키", self.activate_key)
+        activate_note = QLabel("이 서버(나루)의 룬 활성화는 <b>SPACE</b> 입니다.")
+        activate_note.setObjectName("subtitle")
+        solve_form.addRow(activate_note)
         solve_form.addRow("활성화 시도 횟수", self.activate_taps)
+        solve_form.addRow("활성화 키 누름 시간", self.activate_press)
+        solve_form.addRow("정렬 후 안정화 대기", self.activate_settle)
+        solve_form.addRow("활성화 후 UI 대기", self.activate_gap)
+        solve_form.addRow("시도 사이 미세 이동", self.nudge_ms)
+        activate_hint = QLabel(
+            "스페이스바가 안 먹을 때: <b>누름 시간</b>을 150ms 로, <b>시도 횟수</b>를 4회로 올리세요. "
+            "정렬 직후 캐릭터가 미끄러지면 <b>안정화 대기</b>를 0.4초까지 늘립니다. "
+            "<b>미세 이동</b>은 시도할 때마다 좌우로 조금씩 훑는 폭입니다."
+        )
+        activate_hint.setObjectName("subtitle")
+        activate_hint.setWordWrap(True)
+        solve_form.addRow(activate_hint)
         solve_form.addRow("화살표 키 누름 시간", self.arrow_press)
         solve_form.addRow("화살표 입력 간격", self.arrow_gap)
         solve_form.addRow("화살표 UI 대기", self.arrow_wait)
@@ -409,6 +428,18 @@ class MainWindow(QMainWindow):
         approach_form.addRow("접근 제한 시간", self.approach_seconds)
         approach_form.addRow(self.use_rope)
         layout.addWidget(approach_box)
+
+        diagnose_button = QPushButton("룬 해제 진단 실행 (설정 점검 + 단계별 확인)")
+        diagnose_button.setObjectName("primary")
+        diagnose_button.clicked.connect(self._run_diagnostics)
+        layout.addWidget(diagnose_button)
+        diagnose_note = QLabel(
+            "지금 화면 한 장으로 설정 실수·미니맵 인식·룬 감지·화살표 판독을 한 번에 점검해 "
+            "로그로 알려주고, 화면을 <code>logs/</code> 에 저장합니다. 룬이 떠 있는 상태에서 누르면 가장 정확합니다."
+        )
+        diagnose_note.setObjectName("subtitle")
+        diagnose_note.setWordWrap(True)
+        layout.addWidget(diagnose_note)
 
         test_row = QHBoxLayout()
         for text, handler in [
@@ -585,6 +616,10 @@ class MainWindow(QMainWindow):
         rune.detect_scale = self.detect_scale.value()
         rune.activate_key = self.activate_key.key()
         rune.activate_taps = self.activate_taps.value()
+        rune.activate_press_ms = self.activate_press.value()
+        rune.activate_settle = self.activate_settle.value()
+        rune.activate_gap = self.activate_gap.value()
+        rune.minimap.nudge_ms = self.nudge_ms.value()
         rune.arrow_press_ms = self.arrow_press.value()
         rune.arrow_gap = self.arrow_gap.value()
         rune.arrow_wait = self.arrow_wait.value()
@@ -637,6 +672,11 @@ class MainWindow(QMainWindow):
         self.arrow_count.setValue(cfg.rune.arrow_count)
         self.stable_frames.setValue(cfg.rune.arrow_stable_frames)
         self.activate_key.select(cfg.rune.activate_key)
+        self.activate_taps.setValue(cfg.rune.activate_taps)
+        self.activate_press.setValue(cfg.rune.activate_press_ms)
+        self.activate_settle.setValue(cfg.rune.activate_settle)
+        self.activate_gap.setValue(cfg.rune.activate_gap)
+        self.nudge_ms.setValue(cfg.rune.minimap.nudge_ms)
         self.source_minimap.setChecked(cfg.rune.source == "minimap")
         self.use_banner.setChecked(cfg.rune.use_banner)
         self.mm_roi_label.setText(cfg.rune.minimap.roi.describe())
@@ -1056,13 +1096,43 @@ class MainWindow(QMainWindow):
             f"(임계값 {self.config.rune.arrow_threshold:.2f})"
         )
 
+    def _run_diagnostics(self) -> None:
+        """설정 실수 + 현재 화면의 각 단계를 한 번에 점검해 로그로 출력한다."""
+        from ..diagnostics import diagnose_frame, save_failure_snapshot
+        from ..vision.minimap import MinimapVision
+
+        self.collect()
+        frame = self._current_frame()
+        vision = self._vision_for_test()
+        minimap = MinimapVision(self.config)
+
+        self.bus.info("───── 룬 해제 진단 시작 ─────")
+        issues = diagnose_frame(self.config, frame, vision, minimap)
+        for issue in issues:
+            self.bus.log(issue.formatted(), issue.level)
+
+        problems = [i for i in issues if i.level in ("warn", "error")]
+        if problems:
+            self.bus.warn(f"진단 결과: 확인이 필요한 항목 {len(problems)}개 (위 ✖/▲ 줄)")
+        else:
+            self.bus.ok("진단 결과: 설정에서 발견된 문제 없음")
+
+        if frame is not None:
+            try:
+                saved = save_failure_snapshot(frame, self.config, prefix="diagnose", minimap=minimap)
+                if saved:
+                    self.bus.info("진단 화면 저장: " + ", ".join(str(p) for p in saved))
+            except Exception as exc:
+                self.bus.warn(f"진단 화면 저장 실패: {exc}")
+        self.bus.info("───── 룬 해제 진단 끝 ─────")
+
     def _save_screenshot(self) -> None:
         frame = self._current_frame()
         if frame is None:
             return
         import time
 
-        path = DEFAULT_TEMPLATE_DIR.parent / "logs" / f"screen_{int(time.time())}.png"
+        path = LOG_DIR / f"screen_{int(time.time())}.png"
         save_png(frame, path)
         self.bus.info(f"현재 화면 저장: {path}")
 
