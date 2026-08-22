@@ -50,6 +50,9 @@ class DemoSettings:
     minimap_rect: tuple[int, int, int, int] | None = None  # None 이면 기본 위치
     minimap_rune_bgr: tuple[int, int, int] = synth.MINIMAP_RUNE_BGR
     minimap_char_bgr: tuple[int, int, int] = synth.MINIMAP_CHAR_BGR
+    #: 캐릭터 표식이 룬 표식을 덮어 가리는 거리(미니맵 px). 실제 게임과 같은 동작.
+    #: 0 이면 가리지 않는다(비전 단위 테스트용).
+    minimap_occlude_px: int = 0
 
 
 @dataclass
@@ -216,6 +219,12 @@ class DemoWorld:
         scale = max(1.0, self.settings.minimap_scale)
         dx = int(round(self.rune_offset[0] / scale))
         dy = int(round(-self.rune_offset[1] / scale))  # 미니맵 y 는 아래로 증가
+
+        occlude = self.settings.minimap_occlude_px
+        if occlude and abs(dx) <= occlude and abs(dy) <= occlude:
+            # 캐릭터 표식이 룬 표식 위에 그려져 보라색이 보이지 않는 상태
+            return char, None
+
         rune = (
             max(4, min(mw - 4, char[0] + dx)),
             max(4, min(mh - 4, char[1] + dy)),

@@ -158,6 +158,7 @@ def run_headless(config: AppConfig, bus: EventBus, seconds: float) -> int:
         settings.minimap_rune_bgr = color_from_spec(mm.rune_color)
         settings.minimap_char_bgr = color_from_spec(mm.char_color)
         settings.max_offset_x = 420
+        settings.minimap_occlude_px = 3
     world = DemoWorld(bus=bus, settings=settings)
     backend = RecordingBackend(sink=world.on_key)
     vision = RuneVision(config)

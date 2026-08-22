@@ -97,17 +97,30 @@ class RuneSolver:
             frame = self.frames()
             reading = self.minimap.read(frame) if frame is not None else None
             if reading is None or reading.rune is None:
-                return self._done(RuneOutcome.NO_RUNE, started)
-            self.bus.warn(
-                f"미니맵에서 룬 발견 ({reading.describe()}) → 스킬 입력 중단, 룬 해제 집중"
-            )
-            ok, detail = self._approach_minimap(started)
-            if self._abort():
-                return self._done(RuneOutcome.ABORTED, started)
-            if not ok:
-                self.bus.warn(f"룬 접근 실패: {detail}")
-                return self._done(RuneOutcome.APPROACH_TIMEOUT, started, detail=detail)
-            self._fine_align_on_screen()
+                # 룬 위에 서 있으면 캐릭터 표식이 룬 표식을 덮어 미니맵에서 사라진다.
+                # 이때는 화면에 룬이 크게 보이므로 그것으로 확인한다.
+                on_screen = (
+                    cfg.minimap.screen_fallback
+                    and frame is not None
+                    and self.vision.detect_rune(frame) is not None
+                )
+                if not on_screen:
+                    return self._done(RuneOutcome.NO_RUNE, started)
+                self.bus.warn(
+                    "미니맵 표식이 가려졌지만 화면에서 룬 확인 → 스킬 입력 중단, 룬 해제 집중"
+                )
+                self._fine_align_on_screen()
+            else:
+                self.bus.warn(
+                    f"미니맵에서 룬 발견 ({reading.describe()}) → 스킬 입력 중단, 룬 해제 집중"
+                )
+                ok, detail = self._approach_minimap(started)
+                if self._abort():
+                    return self._done(RuneOutcome.ABORTED, started)
+                if not ok:
+                    self.bus.warn(f"룬 접근 실패: {detail}")
+                    return self._done(RuneOutcome.APPROACH_TIMEOUT, started, detail=detail)
+                self._fine_align_on_screen()
         elif cfg.use_banner:
             frame = self.frames()
             banner = self.vision.detect_banner(frame) if frame is not None else None
@@ -246,6 +259,7 @@ class RuneSolver:
         last: str = "시작 전"
         damping = 1.0  # 목표를 지나쳤을 때 이동량을 줄이는 계수
         previous_sign = 0
+        last_dx: float | None = None  # 표식이 가려졌을 때 판단 근거로 쓴다
 
         while self.clock.now() < deadline:
             if self._abort():
@@ -255,6 +269,22 @@ class RuneSolver:
                 return False, "화면 캡처 실패"
             reading = self.minimap.read(frame)
             if reading.rune is None:
+                # 캐릭터(노랑)가 룬(보라) 위에 올라가면 표식이 가려져 사라진다.
+                # 직전 dx 는 '이동 전' 값이므로, 방금 이동한 거리를 빼서 현재 위치를 추정한다.
+                estimate = last_dx
+                if estimate is not None and pending is not None:
+                    held_ms, before = pending
+                    moved = held_ms / max(1.0, ms_per_px)
+                    estimate = before - (moved if before > 0 else -moved)
+                covered = max(1.0, float(cfg.covered_tolerance))
+                if estimate is not None and abs(estimate) <= covered:
+                    self.bus.debug(
+                        f"룬 표식이 캐릭터에 가려짐 (추정 dx {estimate:+.1f}) → 위치 일치로 판단"
+                    )
+                    return True, "표식 겹침(위치 일치)"
+                if cfg.screen_fallback and self.vision.detect_rune(frame) is not None:
+                    self.bus.debug("표식은 가려졌지만 화면에 룬이 보임 → 위치 일치로 판단")
+                    return True, "화면에서 룬 확인"
                 return False, "미니맵에서 룬 표식이 사라졌습니다"
             if reading.char is None:
                 return False, "미니맵에서 캐릭터 표식을 찾지 못했습니다 (캐릭터 색 설정 확인)"
@@ -265,6 +295,7 @@ class RuneSolver:
                 )
 
             dx, dy = float(reading.dx), float(reading.dy)  # type: ignore[arg-type]
+            last_dx = dx
             last = f"dx {dx:+.1f}, dy {dy:+.1f}"
 
             if pending is not None:
@@ -353,22 +384,30 @@ class RuneSolver:
     def _nudge(self, index: int) -> None:
         """활성화가 안 되면 좌우로 아주 조금 움직여 위치를 다시 맞춘다.
 
-        룬은 정확히 겹쳐야 활성화되므로, 스페이스바가 안 먹으면 몇 픽셀 어긋난 것이다.
+        룬은 정확히 겹쳐야 활성화된다. 그런데 겹치는 순간에는 캐릭터 표식이 룬 표식을
+        가려서 미니맵으로 남은 오차를 알 수 없다. 그래서 오차를 알 수 있으면 그 방향으로,
+        모르면 **좌우로 번갈아 폭을 늘려가며**(지그재그) 정확한 지점을 훑는다.
         """
         cfg = self.config.rune.minimap
         if not self.config.rune.use_minimap or cfg.nudge_ms <= 0:
             return
         keys = self.config.keys
-        direction: str | None = None
         frame = self.frames()
         if frame is not None:
             reading = self.minimap.read(frame)
-            if reading.usable and abs(reading.dx or 0) > 0.2:
-                direction = keys.right if (reading.dx or 0) > 0 else keys.left
-        if direction is None:  # 남은 오차가 없으면 좌우를 번갈아 시도
-            direction = keys.right if index % 2 == 0 else keys.left
-        step = int(cfg.nudge_ms * (1 + index // 2))
-        self.bus.debug(f"활성화 실패 → 미세 이동 {direction} {step}ms 후 재시도")
+            if reading.usable and abs(reading.dx or 0) > 0.5:
+                dx = float(reading.dx or 0)
+                direction = keys.right if dx > 0 else keys.left
+                step = int(min(cfg.max_hold_ms, max(cfg.nudge_ms, abs(dx) * cfg.ms_per_px)))
+                self.bus.debug(f"활성화 실패 → 남은 오차 {dx:+.1f}px 만큼 이동 {step}ms")
+                self.inputs.hold(direction, step, sleeper=self.clock.sleep)
+                self.clock.sleep(0.15)
+                return
+
+        # 표식이 가려져 오차를 모르는 상태: +1, -2, +3, -4 … 로 훑는다
+        direction = keys.right if index % 2 == 0 else keys.left
+        step = int(cfg.nudge_ms * (index + 1))
+        self.bus.debug(f"활성화 실패 → 지그재그 탐색 {direction} {step}ms 후 재시도")
         self.inputs.hold(direction, step, sleeper=self.clock.sleep)
         self.clock.sleep(0.15)
 

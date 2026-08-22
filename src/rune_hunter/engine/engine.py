@@ -37,6 +37,9 @@ from .scheduler import SkillScheduler
 #: 0 으로 두면 루프가 CPU 한 코어를 그대로 태운다.
 MIN_SLEEP = 0.004
 
+#: 미니맵 모드에서 화면 이미지 보조 확인을 몇 번에 한 번 할지
+SCREEN_FALLBACK_EVERY = 4
+
 
 class EngineState(str, Enum):
     STOPPED = "정지"
@@ -123,6 +126,7 @@ class MacroEngine:
         self._move_dir = 1
         self._warned_no_window = False
         self._warned_focus = False
+        self._fallback_tick = 0
         self.last_attempt: RuneAttempt | None = None
 
     # --- 생명주기 -------------------------------------------------------
@@ -275,6 +279,15 @@ class MacroEngine:
             found = self.vision.detect_banner(frame) is not None
         elif cfg.use_minimap:
             found = self.minimap.read(frame).rune is not None
+            self._fallback_tick += 1
+            if (
+                not found
+                and cfg.minimap.screen_fallback
+                and self._fallback_tick % SCREEN_FALLBACK_EVERY == 0
+            ):
+                # 룬 위에 서 있어 표식이 가려진 경우를 화면 이미지로 보조 확인.
+                # 미니맵 판독(0.3ms)보다 비싸므로(수 ms) 매번 하지 않는다.
+                found = self.vision.detect_rune(frame) is not None
         else:
             match = self.vision.detect_rune(frame)
             found = match is not None

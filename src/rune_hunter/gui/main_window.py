@@ -665,6 +665,8 @@ class MainWindow(QMainWindow):
             settings.minimap_rune_bgr = color_from_spec(mm.rune_color)
             settings.minimap_char_bgr = color_from_spec(mm.char_color)
             settings.max_offset_x = 420
+            # 실제 게임처럼 겹치면 캐릭터 표식이 룬 표식을 가린다
+            settings.minimap_occlude_px = 3
         return settings
 
     def _make_engine(self) -> MacroEngine:

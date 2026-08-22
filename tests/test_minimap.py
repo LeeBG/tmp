@@ -264,6 +264,56 @@ def test_sample_color_ignores_dark_background(mm_config):
     assert reading.dx == pytest.approx(20, abs=2)
 
 
+def test_covered_marker_counts_as_aligned(mm_config):
+    """겹치는 순간 보라색이 노란색에 가려지는데, 이걸 '사라짐'으로 보면 안 된다."""
+    clock = ManualClock()
+    settings = DemoSettings(
+        first_rune_after=0.0, activate_key="SPACE", minimap_occlude_px=3
+    )
+    world = build_world(clock, offset=(300, 0), settings=settings)
+    backend = RecordingBackend(sink=world.on_key)
+
+    attempt = solver_for(mm_config, world, clock, backend).solve()
+
+    assert attempt.outcome is RuneOutcome.SUCCESS, attempt.detail
+    assert world.solved == 1
+    assert "SPACE" in backend.taps()
+
+
+def test_marker_vanishing_far_away_is_still_a_failure(mm_config):
+    """멀리서 표식이 사라지면(다른 사람이 먹은 경우) 실패로 처리해야 한다."""
+    clock = ManualClock()
+    world = build_world(clock, offset=(600, 0))
+    backend = RecordingBackend(sink=world.on_key)
+    solver = solver_for(mm_config, world, clock, backend)
+
+    original = world.render
+    calls = {"n": 0}
+
+    def vanishing():
+        calls["n"] += 1
+        if calls["n"] > 2:
+            world.rune_present = False
+        return original()
+
+    solver.frames = vanishing
+    attempt = solver.solve()
+    assert attempt.outcome is RuneOutcome.APPROACH_TIMEOUT
+    assert "사라졌" in attempt.detail
+
+
+def test_occluded_alignment_from_various_distances(mm_config):
+    for offset in [(0, 0), (150, 0), (-420, 0), (100, 150)]:
+        clock = ManualClock()
+        settings = DemoSettings(
+            first_rune_after=0.0, activate_key="SPACE", minimap_occlude_px=3
+        )
+        world = build_world(clock, offset=offset, settings=settings)
+        backend = RecordingBackend(sink=world.on_key)
+        attempt = solver_for(mm_config, world, clock, backend).solve()
+        assert attempt.outcome is RuneOutcome.SUCCESS, f"{offset}: {attempt.detail}"
+
+
 def test_detects_overlapping_color_ranges(mm_config):
     """룬 색과 캐릭터 색이 같은 표식을 가리키면 정렬 완료로 착각하면 안 된다."""
     clock = ManualClock()

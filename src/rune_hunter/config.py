@@ -155,6 +155,8 @@ class MinimapConfig:
     jump_down: bool = True                 # 아래로 내려갈 때 아래+점프 사용
     nudge_ms: int = 80                     # 활성화 실패 시 미세 이동 시간
     screen_fine_align: bool = True         # 룬이 화면에 보이면 템플릿으로 최종 미세 정렬
+    covered_tolerance: int = 4             # 이 거리 안에서 룬 표식이 사라지면 '겹쳤다'로 판단
+    screen_fallback: bool = True           # 표식이 가려졌을 때 화면의 룬 이미지로 보조 확인
 
 
 @dataclass
