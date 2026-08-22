@@ -928,16 +928,37 @@ class MainWindow(QMainWindow):
         self.bus.info(f"미니맵 영역 설정: {roi.describe()}")
 
     def _sample_minimap_color(self, target: str) -> None:
+        import cv2
+
         from ..vision.minimap import MinimapVision
 
         frame = self._current_frame()
         if frame is None:
             return
         label = "룬(보라색)" if target == "rune" else "캐릭터(노란색)"
+
+        # 미니맵 표식은 2~4픽셀이라 원본 화면에서는 드래그가 거의 불가능하다.
+        # 지정된 미니맵 영역만 잘라 확대해서 보여준다 (색이 변하지 않는 최근접 확대).
+        mm = self.config.rune.minimap
+        height, width = frame.shape[:2]
+        x, y, w, h = mm.roi.to_pixels(width, height)
+        if w * h > width * height * 0.25:
+            self.bus.warn(
+                "미니맵 영역이 너무 넓습니다 — 먼저 ‘영역 지정’ 으로 미니맵만 지정하면 색 추출이 쉬워집니다."
+            )
+        crop_area = frame[y : y + h, x : x + w]
+        zoom = max(1, min(16, int(min(1000 / max(1, w), 700 / max(1, h)))))
+        view = (
+            cv2.resize(crop_area, (w * zoom, h * zoom), interpolation=cv2.INTER_NEAREST)
+            if zoom > 1
+            else crop_area
+        )
+
         dialog = RegionSelectDialog(
-            frame,
-            f"{label} 표식 색 추출",
-            f"미니맵에서 {label} 표식 부분만 작게 드래그하세요. 표식 색만 최대한 담기게 잡으면 정확합니다.",
+            view,
+            f"{label} 표식 색 추출 — {zoom}배 확대",
+            f"확대된 미니맵입니다. <b>{label} 표식</b>만 작게 드래그하세요.<br>"
+            "표식 색만 담기게 잡을수록 정확합니다. 배경이 많이 섞이면 인식이 어긋납니다.",
             self,
         )
         if not dialog.exec():
@@ -959,6 +980,16 @@ class MainWindow(QMainWindow):
             self.config.rune.minimap.char_color = spec
             self.mm_char_color_label.setText(spec.describe())
         self.bus.ok(f"{label} 색 범위 설정: {spec.describe()}")
+
+        # 방금 정한 색으로 실제 표식이 잡히는지 바로 알려준다
+        reading = MinimapVision(self.config).read(frame)
+        found = reading.rune if target == "rune" else reading.char
+        if found is not None:
+            self.bus.ok(f"{label} 표식 인식 확인 — 미니맵 좌표 {found.center}, 크기 {found.area}px")
+        else:
+            self.bus.warn(
+                f"{label} 표식을 찾지 못했습니다 — 표식만 더 정확히 드래그해서 다시 추출해 주세요."
+            )
 
         if MinimapVision.ranges_overlap(spec, other):
             message = (
