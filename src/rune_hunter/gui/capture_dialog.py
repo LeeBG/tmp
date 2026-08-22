@@ -135,11 +135,6 @@ class RegionSelectDialog(QDialog):
 
 
 def save_png(image: np.ndarray, path) -> None:
-    from pathlib import Path
+    from ..diagnostics import save_image
 
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    ok, buffer = cv2.imencode(".png", image)
-    if not ok:
-        raise RuntimeError("PNG 인코딩에 실패했습니다.")
-    p.write_bytes(buffer.tobytes())
+    save_image(image, path)
