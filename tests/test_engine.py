@@ -189,6 +189,24 @@ def test_minimap_mode_solves_rune_that_is_off_screen(config, vision, bus):
     assert backend.count("U") > 10, "해제 후 사냥이 재개되어야 한다"
 
 
+def test_start_warns_about_broken_rune_settings(config, vision, bus):
+    """시작할 때 룬 해제를 망가뜨리는 설정을 미리 알려줘야 한다."""
+    config.rune.enabled = False  # 실제 해제는 돌리지 않고 경고만 확인
+    config.attack.hunt.enabled = False
+    config.rune.source = "minimap"
+    config.rune.minimap.enabled = True
+    config.rune.minimap.rune_color = config.rune.minimap.char_color
+    config.rune.activate_key = "UP"
+    engine, _, _ = build_engine(config, vision, bus)
+
+    config.rune.enabled = True
+    engine._warn_about_config()
+    messages = [e.message for e in bus.drain()]
+
+    assert any("설정 점검" in m and "겹칩니다" in m for m in messages), messages
+    assert any("스페이스바" in m for m in messages), messages
+
+
 def test_no_input_when_window_missing(config, vision, bus):
     class Missing:
         def find(self, titles):

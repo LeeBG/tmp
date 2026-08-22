@@ -6,10 +6,13 @@
 단계
 1) 감지  : 화면에서 룬 템플릿을 찾는다.
 2) 접근  : (선택) 룬과 캐릭터의 x/y 차이를 보고 방향키·점프·로프로 붙는다.
-3) 활성화: 룬 앞에서 위 방향키를 눌러 방향 입력 UI 를 띄운다.
+3) 활성화: 룬 앞에서 활성화 키(이 서버는 스페이스바)를 눌러 방향 입력 UI 를 띄운다.
 4) 판독  : 화살표 4개를 읽는다. 같은 결과가 N번 연속 나오면 확정한다.
 5) 입력  : 읽은 순서대로 방향키를 넣는다.
 6) 확인  : 화살표 UI 가 사라지면 성공, 남아 있으면 재시도.
+
+각 단계의 결과는 RuneTrace 에 남아서, 끝날 때 한 줄 요약으로 출력된다.
+어느 단계에서 멈췄는지가 곧 원인이므로, 이 한 줄만 보면 무엇을 고쳐야 하는지 알 수 있다.
 """
 
 from __future__ import annotations
@@ -21,15 +24,20 @@ from enum import Enum
 import numpy as np
 
 from ..config import AppConfig
+from ..diagnostics import region_change_ratio, save_failure_snapshot
 from ..inputs.base import InputBackend
 from ..keys import ARROW_KEYS
 from ..logging_bus import EventBus
 from ..vision.matcher import Match
 from ..vision.minimap import MinimapVision
-from ..vision.rune import RuneVision
+from ..vision.rune import ArrowReading, RuneVision
 from .clock import Clock, RealClock
 
 FrameProvider = Callable[[], np.ndarray | None]
+
+#: 활성화 키를 누른 뒤 화살표 영역이 이 비율 이상 달라지면 "UI 는 떴다"고 본다.
+#: (화살표 템플릿이 안 맞아서 못 읽는 경우와 스페이스바 자체가 안 먹는 경우를 구분한다)
+ARROW_UI_CHANGE_RATIO = 0.01
 
 
 class RuneOutcome(str, Enum):
@@ -44,12 +52,106 @@ class RuneOutcome(str, Enum):
 
 
 @dataclass
+class RuneTrace:
+    """단계별 진행 기록. 실패 원인을 한 줄로 요약하기 위한 것."""
+
+    detected: str = ""                 # 감지 방식("미니맵"/"화면"/"안내 문구"). 빈 값이면 감지 실패
+    aligned: bool | None = None        # None 이면 정렬 단계를 거치지 않음
+    align_moves: int = 0
+    align_detail: str = ""
+    final_dx: float | None = None
+    final_dy: float | None = None
+    activate_key: str = ""
+    activate_taps: int = 0
+    ui_seen: bool = False              # 화살표 UI 를 실제로 인식했다
+    ui_changed: bool = False           # 화살표 영역 화면은 변했다 (템플릿만 못 맞춘 정황)
+    read_ok: bool | None = None
+    read_detail: str = ""
+    arrows_sent: int = 0
+    verify: str = ""
+
+    def summary(self, outcome: RuneOutcome) -> str:
+        head = "룬 해제 성공 요약" if outcome is RuneOutcome.SUCCESS else "룬 해제 실패 요약"
+        parts = [f"감지 O({self.detected})" if self.detected else "감지 X"]
+
+        if self.aligned is None:
+            parts.append("정렬 -")
+        else:
+            detail = f"{self.align_moves}회 이동"
+            if self.final_dx is not None:
+                detail += f", 최종 dx {self.final_dx:+.1f}"
+            if self.align_detail:
+                detail += f", {self.align_detail}"
+            parts.append(f"정렬 {'O' if self.aligned else 'X'}({detail})")
+
+        if not self.activate_taps and not self.ui_seen:
+            parts.append("활성화 -")
+        elif self.ui_seen:
+            parts.append(f"활성화 O({self.activate_key} {self.activate_taps}회, UI 출현)")
+        else:
+            note = "UI 미출현이나 화면은 변함" if self.ui_changed else "UI 미출현"
+            parts.append(f"활성화 X({self.activate_key} {self.activate_taps}회, {note})")
+
+        if self.read_ok is None:
+            parts.append("판독 -")
+        else:
+            parts.append(f"판독 {'O' if self.read_ok else 'X'}({self.read_detail})")
+
+        parts.append(f"입력 O({self.arrows_sent}개)" if self.arrows_sent else "입력 -")
+        parts.append(f"확인 {self.verify}" if self.verify else "확인 -")
+        return f"{head}: " + " → ".join(parts)
+
+    def hint(self, outcome: RuneOutcome) -> str:
+        """다음에 무엇을 확인해야 하는지 한 줄로."""
+        if outcome is RuneOutcome.SUCCESS:
+            return ""
+        if not self.detected:
+            return "룬 감지부터 실패했습니다 — ‘룬 해제 진단 실행’ 으로 미니맵 영역과 색 설정을 확인하세요."
+        if self.aligned is False:
+            return (
+                "룬 위치까지 이동하지 못했습니다 — ‘이동 계수 자동 보정’ 을 켜고 "
+                "‘정렬 제한 시간’ 을 늘리세요. 벽에 막히는 자리면 사냥 위치를 옮겨야 합니다."
+            )
+        if not self.ui_seen:
+            if self.ui_changed:
+                return (
+                    "활성화 키는 전달된 것 같습니다(화살표 영역 화면이 변함). 화살표를 못 읽은 것이므로 "
+                    "‘화살표 1장으로 4방향 자동 생성’ 을 다시 하고 ‘화살표 탐색 영역’ 과 임계값을 확인하세요."
+                )
+            return (
+                "활성화 키를 눌렀지만 화면이 바뀌지 않았습니다 — ① 활성화 키가 SPACE 인지 "
+                "② 캐릭터가 룬과 정확히 겹쳤는지 ③ ‘활성화 키 누름 시간’ 을 150ms 로 늘려보세요."
+            )
+        if self.read_ok is False:
+            return (
+                "화살표 UI 는 떴는데 4개를 읽지 못했습니다 — 화살표 템플릿을 다시 만들고 "
+                "‘화살표 감지 임계값’ 을 0.60 근처까지 낮춰보세요."
+            )
+        if self.verify == "UI 잔존":
+            return "입력이 게임에 전달되지 않았습니다 — ‘화살표 키 누름 시간’ 60~80ms, ‘화살표 입력 간격’ 0.25초로 늘리세요."
+        if self.verify == "룬 잔존":
+            return "입력 순서가 틀렸습니다 — 판독 결과가 화면과 같은지 대조하고 ‘판독 확정 프레임’ 을 3 으로 올리세요."
+        return ""
+
+
+@dataclass
+class ActivateResult:
+    """활성화 시도 결과. '키를 눌렀다' 와 'UI 가 떴다' 를 구분해서 들고 있는다."""
+
+    reading: ArrowReading | None = None
+    ui_seen: bool = False
+    changed: float = 0.0               # 화살표 영역이 달라진 픽셀 비율
+
+
+@dataclass
 class RuneAttempt:
     outcome: RuneOutcome
     arrows: list[str] = field(default_factory=list)
     elapsed: float = 0.0
     retries: int = 0
     detail: str = ""
+    summary: str = ""
+    trace: RuneTrace = field(default_factory=RuneTrace)
 
     @property
     def success(self) -> bool:
@@ -76,17 +178,61 @@ class RuneSolver:
         self.clock = clock or RealClock()
         self._abort = abort or (lambda: False)
         self.minimap = minimap or MinimapVision(config)
+        self.trace = RuneTrace()
 
     # --- 공개 API -------------------------------------------------------
     def solve(self, known_rune: Match | None = None) -> RuneAttempt:
         started = self.clock.now()
+        self.trace = RuneTrace(activate_key=self.config.rune.activate_key)
         try:
-            return self._solve(started, known_rune)
+            attempt = self._solve(started, known_rune)
         except Exception as exc:  # 매크로가 죽지 않게 항상 회수
             self.bus.error(f"룬 해제 중 오류: {exc}")
             self.inputs.release_all()
-            return RuneAttempt(
-                RuneOutcome.ERROR, elapsed=self.clock.now() - started, detail=str(exc)
+            attempt = RuneAttempt(
+                RuneOutcome.ERROR,
+                elapsed=self.clock.now() - started,
+                detail=str(exc),
+                trace=self.trace,
+            )
+        self._report(attempt)
+        return attempt
+
+    def _report(self, attempt: RuneAttempt) -> None:
+        """단계별 요약 + 다음에 확인할 것 + (실패 시) 화면 저장."""
+        if attempt.outcome is RuneOutcome.NO_RUNE:
+            return
+        attempt.summary = self.trace.summary(attempt.outcome)
+        if attempt.success:
+            self.bus.info(attempt.summary)
+            return
+        self.bus.warn(attempt.summary)
+        hint = self.trace.hint(attempt.outcome)
+        if hint:
+            self.bus.warn(f"확인할 것: {hint}")
+        self._save_snapshot(attempt.outcome)
+
+    def _save_snapshot(self, outcome: RuneOutcome) -> None:
+        if not self.config.rune.save_failure_shots:
+            return
+        prefix = {
+            RuneOutcome.ACTIVATE_TIMEOUT: "activate_fail",
+            RuneOutcome.READ_FAILED: "read_fail",
+            RuneOutcome.VERIFY_FAILED: "verify_fail",
+            RuneOutcome.APPROACH_TIMEOUT: "approach_fail",
+        }.get(outcome)
+        if prefix is None:
+            return
+        try:
+            saved = save_failure_snapshot(
+                self.frames(), self.config, prefix=prefix, minimap=self.minimap
+            )
+        except Exception as exc:
+            self.bus.debug(f"실패 화면 저장 실패: {exc}")
+            return
+        if saved:
+            self.bus.warn(
+                "실패 시점 화면 저장: " + ", ".join(str(p) for p in saved) + " (원인 파악에 사용)"
             )
 
     # --- 내부 단계 -------------------------------------------------------
@@ -106,15 +252,21 @@ class RuneSolver:
                 )
                 if not on_screen:
                     return self._done(RuneOutcome.NO_RUNE, started)
+                self.trace.detected = "미니맵(표식 가려짐)"
+                self.trace.aligned = True
+                self.trace.align_detail = "표식 겹침 상태에서 시작"
                 self.bus.warn(
                     "미니맵 표식이 가려졌지만 화면에서 룬 확인 → 스킬 입력 중단, 룬 해제 집중"
                 )
                 self._fine_align_on_screen()
             else:
+                self.trace.detected = "미니맵"
                 self.bus.warn(
                     f"미니맵에서 룬 발견 ({reading.describe()}) → 스킬 입력 중단, 룬 해제 집중"
                 )
                 ok, detail = self._approach_minimap(started)
+                self.trace.aligned = ok
+                self.trace.align_detail = detail
                 if self._abort():
                     return self._done(RuneOutcome.ABORTED, started)
                 if not ok:
@@ -126,6 +278,7 @@ class RuneSolver:
             banner = self.vision.detect_banner(frame) if frame is not None else None
             if banner is None:
                 return self._done(RuneOutcome.NO_RUNE, started)
+            self.trace.detected = "안내 문구"
             self.bus.warn(
                 f"안내 문구 감지 (점수 {banner.score:.2f}) → 스킬 입력 중단, 룬 해제 집중"
             )
@@ -137,12 +290,15 @@ class RuneSolver:
             if rune is None:
                 return self._done(RuneOutcome.NO_RUNE, started)
 
+            self.trace.detected = "화면"
             self.bus.warn(
                 f"룬 감지 (점수 {rune.score:.2f}, 위치 {rune.center}) → 스킬 입력 중단, 룬 해제 집중"
             )
 
             if cfg.approach.enabled:
                 ok, detail = self._approach(started)
+                self.trace.aligned = ok
+                self.trace.align_detail = detail
                 if self._abort():
                     return self._done(RuneOutcome.ABORTED, started)
                 if not ok:
@@ -157,33 +313,50 @@ class RuneSolver:
             if self._abort():
                 return self._done(RuneOutcome.ABORTED, started, retries=retries)
 
-            reading = self._activate()
+            activated = self._activate()
+            reading = activated.reading
             if reading is None:
-                self.bus.warn("룬 활성화 후 방향 입력 UI 를 찾지 못했습니다.")
+                if activated.changed >= ARROW_UI_CHANGE_RATIO:
+                    self.bus.warn(
+                        "활성화 키 입력 후 화살표 영역 화면은 바뀌었지만 화살표를 인식하지 못했습니다 "
+                        f"(변화 {activated.changed:.0%}) — 화살표 템플릿/탐색 영역을 확인하세요."
+                    )
+                else:
+                    self.bus.warn(
+                        "룬 활성화 후 방향 입력 UI 를 찾지 못했습니다 (화살표 영역 화면도 그대로)."
+                    )
                 last_outcome = RuneOutcome.ACTIVATE_TIMEOUT
                 continue
+            self.trace.ui_seen = True
             if not reading.ok:
                 self.bus.warn(f"화살표 판독 실패: {reading.reason}")
                 retry_reading = self._read_arrows(cfg.arrow_wait)
                 if retry_reading is None or not retry_reading.ok:
+                    self.trace.read_ok = False
+                    self.trace.read_detail = reading.reason or "화살표 인식 실패"
                     last_outcome = RuneOutcome.READ_FAILED
                     continue
                 reading = retry_reading
 
+            self.trace.read_ok = True
+            self.trace.read_detail = reading.describe()
             self.bus.info(f"화살표 판독: {reading.describe()}  ({reading.sequence})")
             last_arrows = list(reading.sequence)
             self._send_arrows(reading.sequence)
 
             verdict = self._verify()
             if verdict == "success":
+                self.trace.verify = "성공"
                 self.bus.ok(f"룬 해제 성공 ({reading.describe()}) → 사냥/버프 재개")
                 return self._done(
                     RuneOutcome.SUCCESS, started, arrows=reading.sequence, retries=retries
                 )
             if verdict == "arrows_remain":
+                self.trace.verify = "UI 잔존"
                 self.bus.warn("화살표 UI 가 그대로 남아 있습니다 (입력이 전달되지 않았을 수 있음)")
                 last_outcome = RuneOutcome.VERIFY_FAILED
             else:  # rune_remains — 입력 순서가 틀렸을 때 게임이 이렇게 반응한다
+                self.trace.verify = "룬 잔존"
                 self.bus.warn("화살표는 사라졌지만 룬이 남아 있습니다 — 입력 순서 실패로 판단")
                 last_outcome = RuneOutcome.VERIFY_FAILED
 
@@ -223,6 +396,7 @@ class RuneSolver:
                 hold = int(min(cfg.max_hold_ms, max(60, abs(dx) * cfg.ms_per_px)))
                 self.bus.debug(f"룬 접근: {'오른쪽' if dx > 0 else '왼쪽'} {hold}ms (x차이 {dx}px)")
                 self.inputs.hold(key, hold, sleeper=self.clock.sleep)
+                self.trace.align_moves += 1
                 self.clock.sleep(0.08)
                 continue
 
@@ -278,6 +452,7 @@ class RuneSolver:
                     estimate = before - (moved if before > 0 else -moved)
                 covered = max(1.0, float(cfg.covered_tolerance))
                 if estimate is not None and abs(estimate) <= covered:
+                    self.trace.final_dx = estimate
                     self.bus.debug(
                         f"룬 표식이 캐릭터에 가려짐 (추정 dx {estimate:+.1f}) → 위치 일치로 판단"
                     )
@@ -297,6 +472,7 @@ class RuneSolver:
             dx, dy = float(reading.dx), float(reading.dy)  # type: ignore[arg-type]
             last_dx = dx
             last = f"dx {dx:+.1f}, dy {dy:+.1f}"
+            self.trace.final_dx, self.trace.final_dy = dx, dy
 
             if pending is not None:
                 held_ms, before = pending
@@ -338,11 +514,13 @@ class RuneSolver:
                     f"미니맵 이동: {'오른쪽' if dx > 0 else '왼쪽'} {hold}ms ({last})"
                 )
                 self.inputs.hold(key, hold, sleeper=self.clock.sleep)
+                self.trace.align_moves += 1
                 pending = (hold, dx)
                 self.clock.sleep(cfg.settle)
                 continue
 
             if dy < -v_tolerance:  # 룬이 위쪽
+                self.trace.align_moves += 1
                 if cfg.use_rope:
                     self.bus.debug(f"미니맵 이동: 로프 커넥트로 상승 ({last})")
                     self.inputs.tap(keys.rope, 60, sleeper=self.clock.sleep)
@@ -352,6 +530,7 @@ class RuneSolver:
                     self.inputs.tap(keys.jump, 60, sleeper=self.clock.sleep)
                     self.clock.sleep(0.5)
             elif dy > v_tolerance and cfg.jump_down:  # 룬이 아래쪽
+                self.trace.align_moves += 1
                 self.bus.debug(f"미니맵 이동: 아래 점프 ({last})")
                 self.inputs.chord([keys.down, keys.jump], 70, sleeper=self.clock.sleep)
                 self.clock.sleep(0.6)
@@ -385,8 +564,9 @@ class RuneSolver:
         """활성화가 안 되면 좌우로 아주 조금 움직여 위치를 다시 맞춘다.
 
         룬은 정확히 겹쳐야 활성화된다. 그런데 겹치는 순간에는 캐릭터 표식이 룬 표식을
-        가려서 미니맵으로 남은 오차를 알 수 없다. 그래서 오차를 알 수 있으면 그 방향으로,
-        모르면 **좌우로 번갈아 폭을 늘려가며**(지그재그) 정확한 지점을 훑는다.
+        가려서 미니맵으로 남은 오차를 알 수 없다. 그래서 **미니맵으로 볼 만큼 크게**
+        어긋났으면 그 방향으로 이동하고, 그보다 미세하면 좌우로 번갈아 폭을 늘려가며
+        (지그재그) 정확한 지점을 훑는다.
         """
         cfg = self.config.rune.minimap
         if not self.config.rune.use_minimap or cfg.nudge_ms <= 0:
@@ -395,43 +575,87 @@ class RuneSolver:
         frame = self.frames()
         if frame is not None:
             reading = self.minimap.read(frame)
-            if reading.usable and abs(reading.dx or 0) > 0.5:
-                dx = float(reading.dx or 0)
+            dx = float(reading.dx or 0.0)
+            needed = abs(dx) * cfg.ms_per_px
+            # 남은 오차가 미세 이동 폭보다 작으면 그 방향으로 움직여봐야 지나칠 뿐이다
+            if reading.usable and needed > cfg.nudge_ms * 1.5:
                 direction = keys.right if dx > 0 else keys.left
-                step = int(min(cfg.max_hold_ms, max(cfg.nudge_ms, abs(dx) * cfg.ms_per_px)))
+                step = int(min(cfg.max_hold_ms, needed))
                 self.bus.debug(f"활성화 실패 → 남은 오차 {dx:+.1f}px 만큼 이동 {step}ms")
                 self.inputs.hold(direction, step, sleeper=self.clock.sleep)
                 self.clock.sleep(0.15)
                 return
 
-        # 표식이 가려져 오차를 모르는 상태: +1, -2, +3, -4 … 로 훑는다
+        # +1, -2, +3, -4 … 로 움직이면 시작점 기준 +1, -1, +2, -2 … 를 훑게 된다
         direction = keys.right if index % 2 == 0 else keys.left
-        step = int(cfg.nudge_ms * (index + 1))
+        step = int(min(cfg.max_hold_ms, cfg.nudge_ms * (index + 1)))
         self.bus.debug(f"활성화 실패 → 지그재그 탐색 {direction} {step}ms 후 재시도")
         self.inputs.hold(direction, step, sleeper=self.clock.sleep)
         self.clock.sleep(0.15)
 
-    def _activate(self):
+    def _arrow_region(self, frame: np.ndarray | None) -> np.ndarray | None:
+        """화살표 탐색 영역만 잘라낸다 (활성화 전후 화면 변화 비교용)."""
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return None
+        h, w = frame.shape[:2]
+        x, y, rw, rh = self.config.rune.arrow_roi.to_pixels(w, h)
+        return frame[y : y + rh, x : x + rw].copy()
+
+    def _activate(self) -> ActivateResult:
+        """활성화 키를 눌러 방향 입력 UI 를 띄운다.
+
+        실패했을 때 원인을 좁힐 수 있도록 'UI 를 읽었는가' 와 '화면이 바뀌었는가' 를
+        따로 들고 나온다. 화면은 바뀌었는데 못 읽었다면 키는 먹은 것이고
+        화살표 템플릿이 문제다.
+        """
         cfg = self.config.rune
         attempts = max(1, cfg.activate_taps)
+        result = ActivateResult()
+        self.trace.activate_key = cfg.activate_key
+
+        # 정렬 직후에는 캐릭터가 관성으로 조금 더 미끄러진다. 멈춘 뒤에 눌러야 위치가 맞는다.
+        if cfg.activate_settle > 0:
+            self.clock.sleep(cfg.activate_settle)
+
         for attempt in range(attempts):
             if self._abort():
-                return None
+                return result
             # 화살표 UI 가 이미 떠 있는데 활성화 키를 또 누르면 그 입력이 방향 입력으로
             # 들어가 순서가 어긋난다. 그래서 매 시도 전에 UI 상태를 먼저 확인한다.
             frame = self.frames()
             if frame is not None and self.vision.arrows_visible(frame):
                 self.bus.debug("방향 입력 UI 가 이미 떠 있음 — 활성화 입력 생략")
-                return self._read_arrows(cfg.arrow_wait)
+                result.ui_seen = True
+                result.reading = self._read_arrows(cfg.arrow_wait)
+                return result
 
-            self.inputs.tap(cfg.activate_key, 60, sleeper=self.clock.sleep)
-            self.bus.debug(f"룬 활성화 입력 {attempt + 1}/{attempts} ({cfg.activate_key})")
+            before = self._arrow_region(frame)
+            press_ms = max(20, cfg.activate_press_ms)
+            self.inputs.tap(cfg.activate_key, press_ms, sleeper=self.clock.sleep)
+            self.trace.activate_taps += 1
+            self.bus.debug(
+                f"룬 활성화 입력 {attempt + 1}/{attempts} ({cfg.activate_key}, {press_ms}ms)"
+            )
+
             reading = self._read_arrows(cfg.activate_gap)
             if reading is not None:
-                return reading
+                result.ui_seen = True
+                result.reading = reading
+                return result
+
+            changed = region_change_ratio(before, self._arrow_region(self.frames()))
+            result.changed = max(result.changed, changed)
+            if changed >= ARROW_UI_CHANGE_RATIO:
+                self.trace.ui_changed = True
+                self.bus.debug(
+                    f"활성화 후 화살표 영역이 {changed:.0%} 바뀌었지만 화살표를 인식하지 못했습니다"
+                )
             if attempt < attempts - 1:
                 self._nudge(attempt)
-        return self._read_arrows(cfg.arrow_wait)
+
+        result.reading = self._read_arrows(cfg.arrow_wait)
+        result.ui_seen = result.reading is not None
+        return result
 
     def _read_arrows(self, timeout: float):
         """timeout 안에 안정된 판독이 나오면 반환, 화살표가 아예 없으면 None."""
@@ -466,8 +690,6 @@ class RuneSolver:
                 return reading
             self.clock.sleep(0.04)
         if last is not None:
-            from ..vision.rune import ArrowReading
-
             return ArrowReading(sequence=last, ok=True, reason="타임아웃 직전 판독 사용")
         return best_bad
 
@@ -479,6 +701,7 @@ class RuneSolver:
                 self.bus.warn(f"방향키가 아닌 판독 결과 무시: {direction}")
                 continue
             self.inputs.tap(key, cfg.arrow_press_ms, sleeper=self.clock.sleep)
+            self.trace.arrows_sent += 1
             self.clock.sleep(cfg.arrow_gap)
 
     def _verify(self) -> str:
@@ -537,4 +760,5 @@ class RuneSolver:
             elapsed=self.clock.now() - started,
             retries=retries,
             detail=detail,
+            trace=self.trace,
         )

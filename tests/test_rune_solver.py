@@ -49,8 +49,9 @@ def test_solves_rune_in_front_of_character(config, vision, bus):
     assert world.solved == 1
     assert world.wrong_inputs == 0
     assert attempt.arrows == world.expected or len(attempt.arrows) == 4
-    arrows_sent = [k for k in backend.taps() if k in ARROW_KEYS][1:]  # 첫 UP 은 활성화 입력
+    arrows_sent = [k for k in backend.taps() if k in ARROW_KEYS]
     assert arrows_sent[: len(attempt.arrows)] == attempt.arrows
+    assert "SPACE" in backend.taps(), "활성화는 스페이스바로 해야 한다"
 
 
 def test_reads_the_exact_sequence_shown(config, vision, bus):
@@ -252,6 +253,33 @@ def test_solver_survives_broken_frames(config, vision, bus):
     )
     attempt = solver.solve()
     assert attempt.outcome in tuple(RuneOutcome)
+
+
+def test_success_logs_a_step_by_step_summary(config, vision, bus):
+    """성공해도 단계별 요약이 남아야 설정을 비교할 수 있다."""
+    solver, _, _, _ = build(config, vision, bus, offset=(0, 0))
+    attempt = solver.solve()
+
+    assert attempt.outcome is RuneOutcome.SUCCESS
+    for stage in ("감지 O", "활성화 O", "판독 O", "입력 O", "확인 성공"):
+        assert stage in attempt.summary, attempt.summary
+    assert any("룬 해제 성공 요약" in e.message for e in bus.drain())
+
+
+def test_no_rune_does_not_log_a_summary(config, vision, bus):
+    """룬이 없을 때까지 요약을 남기면 로그가 지저분해진다."""
+    clock = ManualClock()
+    solver = RuneSolver(
+        config=config,
+        vision=vision,
+        inputs=RecordingBackend(),
+        frames=lambda: render_screen(seed=1),
+        bus=bus,
+        clock=clock,
+    )
+    attempt = solver.solve()
+    assert attempt.summary == ""
+    assert not any("요약" in e.message for e in bus.drain())
 
 
 @pytest.mark.parametrize("offset", [(0, 0), (120, 0), (-200, 0), (60, 150), (-60, -150)])

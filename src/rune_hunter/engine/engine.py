@@ -22,6 +22,7 @@ import numpy as np
 
 from ..capture.base import FrameSource
 from ..config import AppConfig
+from ..diagnostics import check_config
 from ..inputs.base import InputBackend
 from ..logging_bus import EventBus
 from ..platform_layer.timing import high_resolution_timer
@@ -163,7 +164,16 @@ class MacroEngine:
         self._thread.start()
         enabled = [s.label for s in self.config.all_skills() if s.enabled]
         self.bus.ok(f"매크로 시작 — 활성 키: {', '.join(enabled) if enabled else '없음'}")
+        self._warn_about_config()
         return True
+
+    def _warn_about_config(self) -> None:
+        """룬 해제를 실패하게 만드는 설정 실수를 시작할 때 미리 알려준다."""
+        if not self.config.rune.enabled:
+            return
+        for issue in check_config(self.config, self.vision):
+            if issue.level in ("warn", "error"):
+                self.bus.log(f"설정 점검: {issue.message}", issue.level)
 
     def stop(self, timeout: float = 2.0) -> None:
         if not self.running:
@@ -324,7 +334,8 @@ class MacroEngine:
             self._stats.rune_success += 1
             self._rune_block_until = self.clock.now() + cfg.cooldown_success
         else:
-            self.bus.warn(f"룬 해제 실패: {attempt.outcome.value} {attempt.detail}".strip())
+            if attempt.outcome is not RuneOutcome.NO_RUNE:
+                self.bus.warn(f"룬 해제 실패: {attempt.outcome.value} {attempt.detail}".strip())
             self._rune_block_until = self.clock.now() + (
                 cfg.cooldown_fail if attempt.outcome is not RuneOutcome.NO_RUNE else 0.0
             )

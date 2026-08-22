@@ -135,13 +135,13 @@ def test_sample_color_from_marker_crop(mm_config):
 
 
 # --- 정렬 + 해제 --------------------------------------------------------
-def solver_for(mm_config, world, clock, backend):
+def solver_for(mm_config, world, clock, backend, bus=None, vision=None):
     return RuneSolver(
         config=mm_config,
-        vision=_template_vision(mm_config),
+        vision=vision or _template_vision(mm_config),
         inputs=backend,
         frames=lambda: world.render(),
-        bus=_bus(),
+        bus=bus or _bus(),
         clock=clock,
     )
 
@@ -398,6 +398,151 @@ def test_nudges_and_retries_when_activation_fails(mm_config, bus):
     attempt = solver_for(mm_config, world, clock, backend).solve()
     assert world.activate_presses >= 2, "활성화를 여러 번 시도해야 한다"
     assert attempt.outcome in (RuneOutcome.SUCCESS, RuneOutcome.ACTIVATE_TIMEOUT)
+
+
+# --- 활성화 단계 (사용자가 실패한 지점) -----------------------------------
+def test_zigzag_search_finds_the_exact_spot(mm_config):
+    """미니맵 정렬 오차 안에 있어도 실제로는 몇십 px 어긋난다 — 지그재그로 찾아내야 한다.
+
+    미니맵 1px = 실제 14px 이라 '정렬 완료' 시점에도 최대 28px 이 남는다.
+    활성화 반경이 그보다 좁으면 첫 스페이스바는 반드시 빗나간다.
+    """
+    clock = ManualClock()
+    settings = DemoSettings(
+        first_rune_after=0.0, activate_key="SPACE", activate_radius_x=10
+    )
+    world = build_world(clock, offset=(20, 0), settings=settings)
+    mm_config.rune.activate_taps = 5
+    mm_config.rune.minimap.nudge_ms = 60  # 60ms ≒ 27px 이동
+    backend = RecordingBackend(sink=world.on_key)
+
+    attempt = solver_for(mm_config, world, clock, backend).solve()
+
+    assert attempt.outcome is RuneOutcome.SUCCESS, attempt.summary
+    assert world.activate_presses >= 2, "첫 시도는 빗나가고 미세 이동 후 성공해야 한다"
+    assert world.solved == 1
+
+
+def test_short_activation_press_is_reported_and_long_one_succeeds(mm_config):
+    """활성화 키를 짧게 누르면 게임이 놓친다 — 누름 시간 설정이 실제로 전달되어야 한다."""
+    settings = lambda: DemoSettings(  # noqa: E731
+        first_rune_after=0.0, activate_key="SPACE", activate_press_min_ms=100
+    )
+    mm_config.rune.activate_taps = 2
+
+    clock = ManualClock()
+    world = build_world(clock, offset=(0, 0), settings=settings())
+    mm_config.rune.activate_press_ms = 30
+    attempt = solver_for(
+        mm_config, world, clock, RecordingBackend(sink=world.on_key)
+    ).solve()
+    assert attempt.outcome is RuneOutcome.ACTIVATE_TIMEOUT
+    assert world.short_press_ignored >= 1
+    assert world.solved == 0
+
+    clock = ManualClock()
+    world = build_world(clock, offset=(0, 0), settings=settings())
+    mm_config.rune.activate_press_ms = 120
+    attempt = solver_for(
+        mm_config, world, clock, RecordingBackend(sink=world.on_key)
+    ).solve()
+    assert attempt.outcome is RuneOutcome.SUCCESS, attempt.summary
+    assert world.short_press_ignored == 0
+
+
+def test_solves_even_when_character_slides_after_moving(mm_config):
+    """방향키를 뗀 뒤 관성으로 미끄러져도 결국 해제해야 한다."""
+    clock = ManualClock()
+    settings = DemoSettings(
+        first_rune_after=0.0,
+        activate_key="SPACE",
+        activate_radius_x=30,
+        slide_px=40,
+        slide_seconds=0.25,
+    )
+    world = build_world(clock, offset=(400, 0), settings=settings)
+    mm_config.rune.activate_taps = 5
+    backend = RecordingBackend(sink=world.on_key)
+
+    attempt = solver_for(mm_config, world, clock, backend).solve()
+    assert attempt.outcome is RuneOutcome.SUCCESS, attempt.summary
+
+
+def test_activation_failure_summary_and_snapshot(mm_config, bus, tmp_path, monkeypatch):
+    """끝내 활성화가 안 되면 단계별 요약과 실패 화면이 남아야 한다."""
+    from rune_hunter import diagnostics
+
+    monkeypatch.setattr(diagnostics, "LOG_DIR", tmp_path)
+    clock = ManualClock()
+    settings = DemoSettings(
+        first_rune_after=0.0, activate_key="SPACE", activate_radius_x=-1
+    )  # 반경 -1 = 어디서 눌러도 활성화되지 않는 세계
+    world = build_world(clock, offset=(0, 0), settings=settings)
+    mm_config.rune.activate_taps = 2
+    mm_config.rune.max_retries = 1
+    backend = RecordingBackend(sink=world.on_key)
+
+    attempt = solver_for(mm_config, world, clock, backend, bus=bus).solve()
+
+    assert attempt.outcome is RuneOutcome.ACTIVATE_TIMEOUT
+    assert "감지 O" in attempt.summary and "활성화 X" in attempt.summary
+    assert "UI 미출현" in attempt.summary
+    assert attempt.trace.activate_taps >= 2
+
+    messages = [e.message for e in bus.drain()]
+    assert any("룬 해제 실패 요약" in m for m in messages), messages
+    assert any("확인할 것" in m for m in messages)
+    assert any("실패 시점 화면 저장" in m for m in messages)
+
+    saved = list(tmp_path.glob("activate_fail_*.png"))
+    assert saved, "활성화 실패 시 화면이 저장되어야 한다"
+    assert any("minimap" in p.name for p in saved), "미니맵 진단 이미지도 함께 저장한다"
+
+
+def test_waits_for_character_to_settle_before_activating(mm_config):
+    """이동 직후 바로 누르면 관성 때문에 빗나간다 — 안정화 대기가 실제로 들어가야 한다."""
+    clock = ManualClock()
+    world = build_world(clock, offset=(300, 0))
+    mm_config.rune.activate_settle = 0.5
+    stamps: list[tuple[float, str, str]] = []
+
+    def sink(event):
+        stamps.append((clock.now(), event.key, event.action))
+        world.on_key(event)
+
+    solver_for(mm_config, world, clock, RecordingBackend(sink=sink)).solve()
+
+    space_at = next(t for t, k, a in stamps if k == "SPACE" and a == "down")
+    moves = [t for t, k, a in stamps if k in ("LEFT", "RIGHT") and a == "up" and t < space_at]
+    assert moves, "이동이 한 번은 있어야 하는 상황이다"
+    assert space_at - max(moves) >= 0.5
+
+
+def test_arrow_ui_appeared_but_templates_missing_is_distinguished(mm_config, bus, tmp_path, monkeypatch):
+    """스페이스바는 먹었는데 화살표 템플릿이 없어서 못 읽는 상황을 구분해야 한다.
+
+    이 경우 사용자에게 '활성화가 안 된다' 가 아니라 '템플릿을 확인하라' 고 알려야 한다.
+    """
+    from rune_hunter import diagnostics
+    from rune_hunter.vision import RuneVision
+
+    monkeypatch.setattr(diagnostics, "LOG_DIR", tmp_path)
+    mm_config.rune.template_dir = str(tmp_path)  # 화살표 템플릿이 없는 폴더
+    mm_config.rune.activate_taps = 2
+    mm_config.rune.max_retries = 0
+    clock = ManualClock()
+    world = build_world(clock, offset=(0, 0))
+    backend = RecordingBackend(sink=world.on_key)
+
+    attempt = solver_for(
+        mm_config, world, clock, backend, bus=bus, vision=RuneVision(mm_config)
+    ).solve()
+
+    assert attempt.outcome is RuneOutcome.ACTIVATE_TIMEOUT
+    assert attempt.trace.ui_changed is True
+    assert "화면은 변함" in attempt.summary
+    messages = [e.message for e in bus.drain()]
+    assert any("화살표 템플릿" in m for m in messages), messages
 
 
 def test_does_not_move_when_already_aligned(mm_config):
