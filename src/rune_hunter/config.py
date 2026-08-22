@@ -183,9 +183,12 @@ class RuneConfig:
     banner_template: str = "rune_banner.png"
     banner_threshold: float = 0.75
     banner_roi: Roi = field(default_factory=lambda: Roi(0.15, 0.05, 0.70, 0.35))
-    activate_key: str = "UP"               # 룬 앞에서 누르는 키
-    activate_taps: int = 2
-    activate_gap: float = 0.45
+    # 이 서버(나루)의 룬 활성화는 스페이스바다. 서버가 다르면 GUI 에서 바꾼다.
+    activate_key: str = "SPACE"
+    activate_taps: int = 3
+    activate_press_ms: int = 120           # 활성화 키를 누르고 있는 시간
+    activate_settle: float = 0.3           # 정렬 직후 캐릭터가 멈출 때까지 대기
+    activate_gap: float = 0.7              # 활성화 후 화살표 UI 가 뜨기를 기다리는 시간
     arrow_wait: float = 2.5                # 화살표 UI 대기 시간
     arrow_stable_frames: int = 2           # 같은 판독이 N번 나오면 확정
     arrow_press_ms: int = 45
@@ -194,6 +197,7 @@ class RuneConfig:
     max_retries: int = 2
     cooldown_success: float = 8.0          # 성공 후 재탐색까지 쉬는 시간
     cooldown_fail: float = 20.0
+    save_failure_shots: bool = True        # 해제 실패 시 그 순간의 화면을 logs/ 에 저장
     template_dir: str = ""                 # 비우면 프로젝트의 templates/
     scales: list[float] = field(default_factory=lambda: [1.0])
     detect_scale: float = 1.0              # 1.0=원본. 0.5 로 줄이면 룬 탐색이 3~4배 빨라진다

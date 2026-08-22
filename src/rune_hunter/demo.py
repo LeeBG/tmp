@@ -3,7 +3,9 @@
 RecordingBackend 가 만든 키 이벤트를 받아 "게임처럼" 반응하는 가짜 세계다.
 - 일정 시간마다 룬이 등장한다.
 - 방향키를 누른 시간만큼 캐릭터가 이동한다(=룬의 화면상 위치가 변한다).
-- 룬 근처에서 위 방향키를 누르면 화살표 4개가 뜬다.
+  방향키를 뗀 뒤에도 관성으로 조금 더 미끄러질 수 있다(`slide_px`).
+- 룬 근처에서 활성화 키(기본 스페이스바)를 **충분히 오래** 누르면 화살표 4개가 뜬다.
+  너무 짧게 누르거나 위치가 어긋나면 아무 일도 일어나지 않는다(실제 게임과 같음).
 - 화살표를 순서대로 정확히 입력하면 해제 성공, 틀리면 실패 처리.
 
 덕분에 접근 → 활성화 → 판독 → 입력 → 확인 전 과정을 실제 게임 없이
@@ -31,9 +33,14 @@ class DemoSettings:
     height: int = 768
     first_rune_after: float = 6.0
     respawn_after: float = 20.0
-    activate_key: str = "UP"
+    activate_key: str = "SPACE"            # 이 서버의 룬 활성화 키
     rope_key: str = "A"
     move_px_per_ms: float = 0.45
+    #: 활성화 키를 이보다 짧게 누르면 게임이 놓친다 (0 이면 길이를 따지지 않음)
+    activate_press_min_ms: int = 0
+    #: 방향키를 뗀 뒤 관성으로 더 미끄러지는 거리와 그 시간 (0 이면 즉시 정지)
+    slide_px: int = 0
+    slide_seconds: float = 0.25
     rope_climb_px: int = 150
     jump_down_px: int = 150
     activate_radius_x: int = 45
@@ -76,10 +83,13 @@ class DemoWorld:
         self._pending_arrows_at: float | None = None
         self._pending_solve_at: float | None = None
         self._down_at: dict[str, float] = {}
+        self._slide: tuple[int, float, float, int] | None = None  # (총 이동, 시작, 끝, 적용분)
         self.spawned = 0
         self.solved = 0
         self.wrong_inputs = 0
         self.activate_presses = 0
+        self.short_press_ignored = 0
+        self.missed_activations = 0
         self.frames_rendered = 0
 
     # --- 시간 ----------------------------------------------------------
@@ -93,6 +103,7 @@ class DemoWorld:
     # --- 게임 진행 ------------------------------------------------------
     def tick(self) -> None:
         now = self._now()
+        self._apply_slide(now)
         if not self.rune_present and now >= self.next_spawn:
             self._spawn_rune()
         if self._pending_arrows_at is not None and now >= self._pending_arrows_at:
@@ -128,9 +139,7 @@ class DemoWorld:
             self._down_at[key] = self._now()
             if self.arrows is not None and key in ARROW_KEYS:
                 self._arrow_input(key)
-            elif key == s.activate_key.upper():
-                self._try_activate()
-            elif key == s.rope_key.upper():
+            elif key == s.rope_key.upper() and self.arrows is None:
                 self._climb(+s.rope_climb_px)
             return
 
@@ -138,11 +147,18 @@ class DemoWorld:
         if pressed_at is None:
             return
         held_ms = max(0.0, (self._now() - pressed_at) * 1000.0)
-        if key in ("LEFT", "RIGHT") and self.arrows is None:
+        if key == s.activate_key.upper() and not (
+            self.arrows is not None and key in ARROW_KEYS
+        ):
+            # 실제 게임처럼 '떼는 순간' 판정한다 — 누른 시간이 짧으면 입력을 놓친다
+            self._try_activate(held_ms)
+        elif key in ("LEFT", "RIGHT") and self.arrows is None:
             step = int(held_ms * s.move_px_per_ms)
             direction = 1 if key == "RIGHT" else -1
             dx, dy = self.rune_offset
             self.rune_offset = (dx - direction * step, dy)
+            if s.slide_px:
+                self._start_slide(direction * s.slide_px)
         elif key == "ALT" and "DOWN" in self._down_at and self.arrows is None:
             self._climb(-s.jump_down_px)
 
@@ -161,20 +177,46 @@ class DemoWorld:
             )
         self.buffer.clear()
 
-    def _try_activate(self) -> None:
+    def _try_activate(self, held_ms: float = 9999.0) -> None:
         s = self.settings
         self.activate_presses += 1
+        if held_ms + 1e-6 < s.activate_press_min_ms:
+            self.short_press_ignored += 1
+            self._log(
+                f"활성화 키를 너무 짧게 눌러 게임이 놓침 ({held_ms:.0f}ms < "
+                f"{s.activate_press_min_ms}ms)"
+            )
+            return
         if not self.rune_present or self.arrows is not None:
             return
         dx, dy = self.rune_offset
         if abs(dx) <= s.activate_radius_x and abs(dy) <= s.activate_radius_y:
             self._pending_arrows_at = self._now() + s.arrow_appear_delay
         else:
+            self.missed_activations += 1
             self._log(f"룬이 너무 멀어 활성화 실패 (dx={dx}, dy={dy})")
 
     def _climb(self, amount: int) -> None:
         dx, dy = self.rune_offset
         self.rune_offset = (dx, dy - amount)
+
+    # --- 관성 -----------------------------------------------------------
+    def _start_slide(self, amount: int) -> None:
+        """방향키를 뗀 뒤에도 amount 만큼 더 미끄러지게 한다."""
+        now = self._now()
+        self._slide = (amount, now, now + max(0.01, self.settings.slide_seconds), 0)
+
+    def _apply_slide(self, now: float) -> None:
+        if self._slide is None:
+            return
+        total, start, end, applied = self._slide
+        ratio = min(1.0, max(0.0, (now - start) / max(1e-6, end - start)))
+        step = int(round(total * ratio)) - applied
+        if step:
+            dx, dy = self.rune_offset
+            self.rune_offset = (dx - step, dy)
+            applied += step
+        self._slide = None if ratio >= 1.0 else (total, start, end, applied)
 
     # --- 렌더링 (FrameSource 인터페이스) --------------------------------
     def render(self) -> np.ndarray:

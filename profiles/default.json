@@ -140,9 +140,20 @@
       "h": 0.3
     },
     "arrow_count": 4,
+    "use_banner": false,
+    "banner_template": "rune_banner.png",
+    "banner_threshold": 0.75,
+    "banner_roi": {
+      "x": 0.15,
+      "y": 0.05,
+      "w": 0.7,
+      "h": 0.35
+    },
     "activate_key": "SPACE",
-    "activate_taps": 2,
-    "activate_gap": 0.45,
+    "activate_taps": 3,
+    "activate_press_ms": 120,
+    "activate_settle": 0.3,
+    "activate_gap": 0.7,
     "arrow_wait": 2.5,
     "arrow_stable_frames": 2,
     "arrow_press_ms": 45,
@@ -151,6 +162,7 @@
     "max_retries": 2,
     "cooldown_success": 8.0,
     "cooldown_fail": 20.0,
+    "save_failure_shots": true,
     "template_dir": "",
     "scales": [
       1.0
@@ -211,7 +223,11 @@
       "settle": 0.12,
       "auto_calibrate": true,
       "use_rope": true,
-      "jump_down": true
+      "jump_down": true,
+      "nudge_ms": 80,
+      "screen_fine_align": true,
+      "covered_tolerance": 4,
+      "screen_fallback": true
     }
   }
 }
