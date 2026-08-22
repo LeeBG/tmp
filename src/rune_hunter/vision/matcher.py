@@ -99,6 +99,29 @@ def clear_cache() -> None:
     _CACHE.clear()
 
 
+#: 화살표 방향을 시계 방향 각도로 표현 (위=0, 오른쪽=90 …)
+DIRECTION_ANGLES = {"UP": 0, "RIGHT": 90, "DOWN": 180, "LEFT": 270}
+
+
+def rotate_clockwise(image: np.ndarray, degrees: int) -> np.ndarray:
+    """90도 단위로 시계 방향 회전."""
+    steps = (degrees // 90) % 4
+    if steps == 0:
+        return image.copy()
+    return np.rot90(image, k=-steps).copy()
+
+
+def rotate_to_direction(image: np.ndarray, source: str, target: str) -> np.ndarray:
+    """한 방향의 화살표 이미지를 다른 방향으로 회전한다.
+
+    게임의 룬 화살표 4개는 같은 스프라이트를 90도씩 돌린 것이므로,
+    한 장만 캡처하면 나머지 세 방향을 만들 수 있다.
+    """
+    src = DIRECTION_ANGLES[source.upper()]
+    dst = DIRECTION_ANGLES[target.upper()]
+    return rotate_clockwise(image, (dst - src) % 360)
+
+
 def to_gray(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
         return image

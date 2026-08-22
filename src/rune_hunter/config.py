@@ -172,8 +172,13 @@ class RuneConfig:
         }
     )
     arrow_threshold: float = 0.70
-    arrow_roi: Roi = field(default_factory=lambda: Roi(0.20, 0.02, 0.60, 0.30))
+    arrow_roi: Roi = field(default_factory=lambda: Roi(0.20, 0.02, 0.60, 0.35))
     arrow_count: int = 4
+    # 상단 안내 문구("엘리트 보스의 저주…") — 룬이 남아 있는 동안 계속 떠 있다
+    use_banner: bool = False
+    banner_template: str = "rune_banner.png"
+    banner_threshold: float = 0.75
+    banner_roi: Roi = field(default_factory=lambda: Roi(0.15, 0.05, 0.70, 0.35))
     activate_key: str = "UP"               # 룬 앞에서 누르는 키
     activate_taps: int = 2
     activate_gap: float = 0.45
@@ -328,6 +333,7 @@ _RESOLVED_TYPES: dict[tuple[str, str], Any] = {
     ("AttackConfig", "movement"): MovementConfig,
     ("RuneConfig", "rune_roi"): Roi,
     ("RuneConfig", "arrow_roi"): Roi,
+    ("RuneConfig", "banner_roi"): Roi,
     ("RuneConfig", "approach"): ApproachConfig,
     ("RuneConfig", "minimap"): MinimapConfig,
     ("MinimapConfig", "roi"): Roi,

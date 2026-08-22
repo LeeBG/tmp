@@ -25,6 +25,7 @@ class ArrowReading:
     matches: list[Match] = field(default_factory=list)
     ok: bool = False
     reason: str = ""
+    scores: dict[str, float] = field(default_factory=dict)
 
     @property
     def count(self) -> int:
@@ -33,6 +34,12 @@ class ArrowReading:
     def describe(self) -> str:
         arrows = {"UP": "↑", "DOWN": "↓", "LEFT": "←", "RIGHT": "→"}
         return " ".join(arrows.get(d, d) for d in self.sequence)
+
+    def describe_scores(self) -> str:
+        """방향별 최고 점수 — 임계값을 정할 때 참고한다."""
+        if not self.scores:
+            return "점수 없음"
+        return ", ".join(f"{k} {v:.2f}" for k, v in sorted(self.scores.items()))
 
 
 class RuneVision:
@@ -75,8 +82,16 @@ class RuneVision:
         return roi.to_pixels(w, h)
 
     def templates_ready(self) -> tuple[bool, list[str]]:
+        """현재 설정에서 실제로 필요한 템플릿만 확인한다.
+
+        미니맵 모드에서는 룬 이미지가 필요 없고, 안내 문구 모드에서는 문구 이미지가 필요하다.
+        """
         cfg = self.config.rune
-        names = [*cfg.rune_templates, *cfg.arrow_templates.values()]
+        names = list(cfg.arrow_templates.values())
+        if not cfg.use_minimap:
+            names.extend(cfg.rune_templates)
+        if cfg.use_banner and cfg.banner_template:
+            names.append(cfg.banner_template)
         missing = [
             str(self.config.template_path(n))
             for n in names
@@ -123,8 +138,13 @@ class RuneVision:
         cfg = self.config.rune
         roi = self._roi_pixels(cfg.arrow_roi, frame)
         candidates: list[Match] = []
+        scores: dict[str, float] = {}
         for direction, name in cfg.arrow_templates.items():
             for template in self._templates([name]):
+                # 진단용으로 임계값과 무관한 최고 점수도 같이 구한다
+                best = self.matcher.find_best(frame, template, roi, threshold=-1.0)
+                if best is not None:
+                    scores[direction] = max(scores.get(direction, 0.0), best.score)
                 found = self.matcher.find_all(
                     frame,
                     template,
@@ -138,7 +158,7 @@ class RuneVision:
                     )
 
         if not candidates:
-            return ArrowReading(ok=False, reason="화살표를 찾지 못함")
+            return ArrowReading(ok=False, reason="화살표를 찾지 못함", scores=scores)
 
         clusters = _cluster_by_x(candidates)
         picked = [max(group, key=lambda m: m.score) for group in clusters]
@@ -151,8 +171,26 @@ class RuneVision:
                 matches=picked,
                 ok=False,
                 reason=f"화살표 {cfg.arrow_count}개 필요, {len(sequence)}개 인식",
+                scores=scores,
             )
-        return ArrowReading(sequence=sequence, matches=picked, ok=True)
+        return ArrowReading(sequence=sequence, matches=picked, ok=True, scores=scores)
+
+    # --- 상단 안내 문구(저주 배너) ---------------------------------------
+    def detect_banner(self, frame: np.ndarray) -> Match | None:
+        """`엘리트 보스의 저주…` 안내 문구가 떠 있는지 확인한다.
+
+        이 문구는 룬이 남아 있는 동안 계속 표시되고 해제되면 사라지므로,
+        룬 등장 감지와 해제 성공 판정 모두에 쓸 수 있다.
+        """
+        cfg = self.config.rune
+        if not cfg.banner_template:
+            return None
+        roi = self._roi_pixels(cfg.banner_roi, frame)
+        for template in self._templates([cfg.banner_template]):
+            match = self.matcher.find_best(frame, template, roi, cfg.banner_threshold)
+            if match is not None:
+                return match
+        return None
 
     def arrows_visible(self, frame: np.ndarray) -> bool:
         """화살표 UI 가 아직 떠 있는지 (해제 성공 판정용)."""

@@ -10,31 +10,32 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from .matcher import rotate_to_direction
+
 ARROW_SIZE = 44
 RUNE_SIZE = (44, 52)  # (w, h)
 DIRECTIONS = ("UP", "DOWN", "LEFT", "RIGHT")
 
 
-def arrow_glyph(direction: str, size: int = ARROW_SIZE) -> np.ndarray:
-    """방향 화살표 글리프 (BGR)."""
+def _arrow_up(size: int) -> np.ndarray:
     img = np.full((size, size, 3), (18, 14, 26), dtype=np.uint8)
     m = size // 2
     pad = int(size * 0.18)
-    tip = {
-        "UP": (m, pad),
-        "DOWN": (m, size - pad),
-        "LEFT": (pad, m),
-        "RIGHT": (size - pad, m),
-    }[direction.upper()]
-    if direction.upper() in ("UP", "DOWN"):
-        base_y = size - pad if direction.upper() == "UP" else pad
-        pts = np.array([tip, (pad, base_y), (size - pad, base_y)], dtype=np.int32)
-    else:
-        base_x = size - pad if direction.upper() == "LEFT" else pad
-        pts = np.array([tip, (base_x, pad), (base_x, size - pad)], dtype=np.int32)
+    pts = np.array(
+        [(m, pad), (pad, size - pad), (size - pad, size - pad)], dtype=np.int32
+    )
     cv2.fillConvexPoly(img, pts, (245, 240, 255))
     cv2.polylines(img, [pts], True, (120, 90, 200), 2)
     return img
+
+
+def arrow_glyph(direction: str, size: int = ARROW_SIZE) -> np.ndarray:
+    """방향 화살표 글리프 (BGR).
+
+    게임과 동일하게 **한 장을 회전**해서 만든다. 방향마다 따로 그리면
+    래스터라이즈 차이 때문에 회전 템플릿과 미세하게 어긋난다.
+    """
+    return rotate_to_direction(_arrow_up(size), "UP", direction.upper())
 
 
 def rune_glyph(size: tuple[int, int] = RUNE_SIZE) -> np.ndarray:

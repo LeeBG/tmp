@@ -300,6 +300,28 @@ class MainWindow(QMainWindow):
             button = QPushButton("화면에서 캡처")
             button.clicked.connect(lambda _=False, s=slot: self._capture_template(s))
             tpl_layout.addWidget(button, i, 2)
+
+        row = len(rows)
+        auto_button = QPushButton("화살표 1장으로 4방향 자동 생성 (권장)")
+        auto_button.clicked.connect(self._capture_arrow_set)
+        tpl_layout.addWidget(auto_button, row, 0, 1, 3)
+        auto_note = QLabel(
+            "게임의 화살표 4개는 같은 그림을 90도씩 돌린 것이라, 한 방향만 캡처하면 나머지는 자동으로 만듭니다."
+        )
+        auto_note.setObjectName("subtitle")
+        auto_note.setWordWrap(True)
+        tpl_layout.addWidget(auto_note, row + 1, 0, 1, 3)
+
+        banner_row = row + 2
+        self.use_banner = QCheckBox("상단 안내 문구로 룬 등장·해제 판정 (엘리트 보스의 저주 문구)")
+        self.use_banner.setChecked(rune.use_banner)
+        tpl_layout.addWidget(self.use_banner, banner_row, 0, 1, 2)
+        banner_button = QPushButton("문구 캡처")
+        banner_button.clicked.connect(lambda: self._capture_template("banner"))
+        tpl_layout.addWidget(banner_button, banner_row, 2)
+        self.template_labels["banner"] = QLabel(rune.banner_template)
+        self.template_labels["banner"].setObjectName("subtitle")
+        tpl_layout.addWidget(self.template_labels["banner"], banner_row + 1, 0, 1, 3)
         layout.addWidget(tpl_box)
 
         roi_box = QGroupBox("탐색 영역 (좁을수록 빠르고 오탐이 적습니다)")
@@ -576,6 +598,7 @@ class MainWindow(QMainWindow):
         rune.approach.vertical_tolerance = self.vertical_tol.value()
         rune.approach.max_seconds = self.approach_seconds.value()
         rune.approach.use_rope = self.use_rope.isChecked()
+        rune.use_banner = self.use_banner.isChecked()
         rune.source = "minimap" if self.source_minimap.isChecked() else "template"
         rune.minimap.enabled = self.source_minimap.isChecked()
         rune.minimap.align_tolerance = self.mm_tolerance.value()
@@ -614,6 +637,7 @@ class MainWindow(QMainWindow):
         self.stable_frames.setValue(cfg.rune.arrow_stable_frames)
         self.activate_key.select(cfg.rune.activate_key)
         self.source_minimap.setChecked(cfg.rune.source == "minimap")
+        self.use_banner.setChecked(cfg.rune.use_banner)
         self.mm_roi_label.setText(cfg.rune.minimap.roi.describe())
         self.mm_rune_color_label.setText(cfg.rune.minimap.rune_color.describe())
         self.mm_char_color_label.setText(cfg.rune.minimap.char_color.describe())
@@ -726,11 +750,66 @@ class MainWindow(QMainWindow):
             self.bus.error(f"화면 캡처 실패: {exc}")
             return None
 
+    def _capture_arrow_set(self) -> None:
+        """화살표 한 방향만 캡처해서 4방향 템플릿을 모두 만든다."""
+        from PySide6.QtWidgets import QInputDialog
+
+        from ..vision.matcher import rotate_to_direction
+
+        frame = self._current_frame()
+        if frame is None:
+            return
+        dialog = RegionSelectDialog(
+            frame,
+            "화살표 캡처 (1장)",
+            "룬 해제 화면의 화살표 <b>하나</b>만 테두리에 맞게 드래그하세요. "
+            "어느 방향인지는 다음 단계에서 고릅니다.",
+            self,
+        )
+        if not dialog.exec():
+            return
+        crop = dialog.cropped()
+        if crop is None or crop.size == 0:
+            QMessageBox.information(self, "영역 없음", "선택된 영역이 없습니다.")
+            return
+
+        options = [ARROW_NAMES[d] for d in ("UP", "DOWN", "LEFT", "RIGHT")]
+        choice, ok = QInputDialog.getItem(
+            self, "방향 선택", "지금 캡처한 화살표의 방향은?", options, 0, False
+        )
+        if not ok:
+            return
+        source = next(d for d, name in ARROW_NAMES.items() if name == choice)
+
+        target_dir = (
+            Path(self.config.rune.template_dir)
+            if self.config.rune.template_dir
+            else DEFAULT_TEMPLATE_DIR
+        )
+        for direction in ("UP", "DOWN", "LEFT", "RIGHT"):
+            image = rotate_to_direction(crop, source, direction)
+            filename = f"arrow_{direction.lower()}.png"
+            save_png(image, target_dir / filename)
+            self.config.rune.arrow_templates[direction] = filename
+            self.template_labels[direction].setText(
+                f"{filename}  ({image.shape[1]}x{image.shape[0]})"
+            )
+        clear_cache()
+        self.bus.ok(
+            f"화살표 4방향 템플릿 생성 완료 ({choice} 기준, {crop.shape[1]}x{crop.shape[0]}) → {target_dir}"
+        )
+        self.bus.info("‘화살표 판독 테스트’ 로 방향별 점수를 확인해 보세요.")
+
     def _capture_template(self, slot: str) -> None:
         frame = self._current_frame()
         if frame is None:
             return
-        label = "룬" if slot == "rune" else f"화살표 {ARROW_NAMES.get(slot, slot)}"
+        if slot == "banner":
+            label = "상단 안내 문구"
+        elif slot == "rune":
+            label = "룬"
+        else:
+            label = f"화살표 {ARROW_NAMES.get(slot, slot)}"
         dialog = RegionSelectDialog(
             frame,
             f"{label} 템플릿 캡처",
@@ -743,7 +822,10 @@ class MainWindow(QMainWindow):
         if crop is None:
             QMessageBox.information(self, "영역 없음", "선택된 영역이 없습니다.")
             return
-        filename = "rune.png" if slot == "rune" else f"arrow_{slot.lower()}.png"
+        filename = {
+            "rune": "rune.png",
+            "banner": "rune_banner.png",
+        }.get(slot, f"arrow_{slot.lower()}.png")
         target_dir = (
             Path(self.config.rune.template_dir)
             if self.config.rune.template_dir
@@ -754,6 +836,9 @@ class MainWindow(QMainWindow):
         clear_cache()
         if slot == "rune":
             self.config.rune.rune_templates = [filename]
+        elif slot == "banner":
+            self.config.rune.banner_template = filename
+            self.use_banner.setChecked(True)
         else:
             self.config.rune.arrow_templates[slot] = filename
         self.template_labels[slot].setText(f"{filename}  ({crop.shape[1]}x{crop.shape[0]})")
@@ -902,6 +987,10 @@ class MainWindow(QMainWindow):
             self.bus.ok(f"화살표 판독: {reading.describe()}  ({ms:.1f}ms)")
         else:
             self.bus.warn(f"판독 실패: {reading.reason} — 인식 {reading.count}개 ({ms:.1f}ms)")
+        self.bus.info(
+            f"방향별 최고 점수: {reading.describe_scores()} "
+            f"(임계값 {self.config.rune.arrow_threshold:.2f})"
+        )
 
     def _save_screenshot(self) -> None:
         frame = self._current_frame()

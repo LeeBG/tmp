@@ -107,6 +107,14 @@ class RuneSolver:
             if not ok:
                 self.bus.warn(f"룬 접근 실패: {detail}")
                 return self._done(RuneOutcome.APPROACH_TIMEOUT, started, detail=detail)
+        elif cfg.use_banner:
+            frame = self.frames()
+            banner = self.vision.detect_banner(frame) if frame is not None else None
+            if banner is None:
+                return self._done(RuneOutcome.NO_RUNE, started)
+            self.bus.warn(
+                f"안내 문구 감지 (점수 {banner.score:.2f}) → 스킬 입력 중단, 룬 해제 집중"
+            )
         else:
             rune = known_rune
             if rune is None:
@@ -235,6 +243,8 @@ class RuneSolver:
         pending: tuple[int, int] | None = None  # (누른 시간, 이동 전 dx)
         stuck = 0
         last: str = "시작 전"
+        damping = 1.0  # 목표를 지나쳤을 때 이동량을 줄이는 계수
+        previous_sign = 0
 
         while self.clock.now() < deadline:
             if self._abort():
@@ -270,8 +280,17 @@ class RuneSolver:
                 return True, "정렬 완료"
 
             if abs(dx) > cfg.align_tolerance:
+                sign = 1 if dx > 0 else -1
+                if previous_sign and sign != previous_sign:
+                    # 목표를 지나쳐 되돌아가는 중 → 이동량을 줄여 진동을 막는다
+                    damping = max(0.35, damping * 0.55)
+                    self.bus.debug(f"미니맵 정렬: 지나침 감지 → 이동량 {damping:.0%}")
+                previous_sign = sign
                 hold = int(
-                    min(cfg.max_hold_ms, max(cfg.min_hold_ms, abs(dx) * ms_per_px))
+                    min(
+                        cfg.max_hold_ms,
+                        max(cfg.min_hold_ms, abs(dx) * ms_per_px * damping),
+                    )
                 )
                 key = keys.right if dx > 0 else keys.left
                 self.bus.debug(
@@ -396,8 +415,15 @@ class RuneSolver:
         return "rune_remains"
 
     def _rune_visible(self, frame) -> bool:
-        """룬이 아직 남아 있는지 (감지 방식에 맞춰 판단)."""
-        if self.config.rune.use_minimap:
+        """룬이 아직 남아 있는지 (감지 방식에 맞춰 판단).
+
+        안내 문구를 쓰는 경우 그것이 가장 확실한 신호다.
+        해제되면 문구가 사라지기 때문이다.
+        """
+        cfg = self.config.rune
+        if cfg.use_banner:
+            return self.vision.detect_banner(frame) is not None
+        if cfg.use_minimap:
             return self.minimap.read(frame).rune is not None
         return self.vision.detect_rune(frame) is not None
 

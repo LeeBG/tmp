@@ -269,10 +269,12 @@ class MacroEngine:
         if frame is None:
             return False
         t0 = self.clock.now()
-        if cfg.use_minimap:
-            reading = self.minimap.read(frame)
-            match = None
-            found = reading.rune is not None
+        match = None
+        if cfg.use_banner:
+            # 안내 문구는 룬이 남아 있는 동안 계속 떠 있어 가장 확실한 신호다
+            found = self.vision.detect_banner(frame) is not None
+        elif cfg.use_minimap:
+            found = self.minimap.read(frame).rune is not None
         else:
             match = self.vision.detect_rune(frame)
             found = match is not None
